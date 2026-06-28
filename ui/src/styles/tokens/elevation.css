@@ -1,0 +1,32 @@
+/* ============================================================
+   PHOTON — ELEVATION (shadows, rings, blur)
+   Slate stays low-shadow: hairline borders do most of the work,
+   shadows are reserved for true overlays (menus, dialogs, lightbox).
+   ============================================================ */
+
+:root {
+  /* Soft cool-tinted shadows for light theme */
+  --shadow-xs:  0 1px 2px rgba(20, 25, 38, 0.06);
+  --shadow-sm:  0 1px 3px rgba(20, 25, 38, 0.08), 0 1px 2px rgba(20, 25, 38, 0.04);
+  --shadow-md:  0 4px 12px rgba(20, 25, 38, 0.10), 0 1px 3px rgba(20, 25, 38, 0.06);
+  --shadow-lg:  0 12px 28px rgba(20, 25, 38, 0.14), 0 4px 8px rgba(20, 25, 38, 0.06);
+  --shadow-xl:  0 28px 56px rgba(20, 25, 38, 0.20), 0 8px 16px rgba(20, 25, 38, 0.08);
+
+  /* Focus ring */
+  --ring:        0 0 0 2px var(--accent);
+  --ring-offset: 0 0 0 2px var(--bg-base), 0 0 0 4px var(--accent);
+
+  /* Glass blur (used sparingly: floating toolbars over photos) */
+  --blur-sm: blur(8px);  /* @kind other */
+  --blur-md: blur(16px); /* @kind other */
+  --blur-lg: blur(28px); /* @kind other */
+}
+
+.dark {
+  /* Deeper shadows on dark; overlays read against near-black */
+  --shadow-xs:  0 1px 2px rgba(0, 0, 0, 0.40);
+  --shadow-sm:  0 1px 3px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.30);
+  --shadow-md:  0 6px 16px rgba(0, 0, 0, 0.50), 0 2px 4px rgba(0, 0, 0, 0.35);
+  --shadow-lg:  0 16px 36px rgba(0, 0, 0, 0.58), 0 4px 10px rgba(0, 0, 0, 0.40);
+  --shadow-xl:  0 32px 64px rgba(0, 0, 0, 0.66), 0 10px 20px rgba(0, 0, 0, 0.45);
+}

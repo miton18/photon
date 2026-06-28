@@ -1,0 +1,10 @@
+[package]
+name = "example-watermark-editor"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+photon-plugin-sdk = { path = "../../photon-plugin-sdk" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+# Same codec set as the server so it round-trips JPEG/PNG/WebP originals.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }

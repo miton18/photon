@@ -1,0 +1,15 @@
+# The server image builds from the repo root (server + plugin crates). Keep the
+# build context small: exclude every build output, dependency cache, and the
+# components the server image doesn't need.
+**/target
+**/node_modules
+**/.git
+**/dist
+data
+photon-ml/models
+ui
+mobileapp
+companion
+photon-ml
+*.md
+docker-compose.yml

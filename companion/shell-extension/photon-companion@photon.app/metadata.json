@@ -1,0 +1,7 @@
+{
+  "uuid": "photon-companion@photon.app",
+  "name": "Photon Companion",
+  "description": "Top-bar indicator for your Photon photo library: quick access to the desktop companion and the web library.",
+  "shell-version": ["45", "46", "47", "48"],
+  "url": "https://github.com/photon/photon"
+}

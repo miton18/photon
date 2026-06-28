@@ -1,0 +1,50 @@
+/* ============================================================
+   PHOTON — SPACING, RADIUS & LAYOUT TOKENS
+   4px base grid. Lightly-rounded radii (balanced/modern).
+   ============================================================ */
+
+:root {
+  /* ---- Spacing scale (4px grid) ---- */
+  --space-0:  0;
+  --space-1:  2px;
+  --space-2:  4px;
+  --space-3:  6px;
+  --space-4:  8px;
+  --space-5:  10px;
+  --space-6:  12px;
+  --space-7:  14px;
+  --space-8:  16px;
+  --space-10: 20px;
+  --space-12: 24px;
+  --space-14: 28px;
+  --space-16: 32px;
+  --space-20: 40px;
+  --space-24: 48px;
+  --space-32: 64px;
+  --space-40: 80px;
+
+  /* ---- Radii (Slate = small/balanced) ---- */
+  --radius-xs:  3px;
+  --radius-sm:  5px;
+  --radius-md:  7px;    /* default control radius */
+  --radius-lg:  10px;
+  --radius-xl:  14px;
+  --radius-2xl: 20px;
+  --radius-pill: 999px;
+
+  /* ---- Photo grid ---- */
+  --photo-radius: 3px;
+  --photo-gap:    4px;
+
+  /* ---- Layout ---- */
+  --sidebar-w:    248px;
+  --sidebar-w-sm: 72px;
+  --topbar-h:     56px;
+  --statusbar-h:  34px;
+  --rightpanel-w: 340px;
+
+  /* ---- Hairline / control heights ---- */
+  --control-h-sm: 28px;
+  --control-h:    34px;
+  --control-h-lg: 40px;
+}

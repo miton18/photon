@@ -1,0 +1,9 @@
+# Issues are for BUGS only. Feature requests go to Discussions.
+blank_issues_enabled: false
+contact_links:
+  - name: 💡 Feature request or idea
+    url: ../../discussions/categories/ideas
+    about: "Photon gathers feature requests as GitHub Discussions, not issues. Please open a discussion so it can be debated and prioritised before any code is written."
+  - name: ❓ Question / help
+    url: ../../discussions/categories/q-a
+    about: "Not sure if it's a bug? Ask in Discussions first."

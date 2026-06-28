@@ -1,0 +1,18 @@
+[package]
+name = "photon-companion"
+version = "0.1.0"
+edition = "2021"
+description = "Photon Companion — a GNOME desktop client for your Photon photo library"
+
+[dependencies]
+# Native GNOME stack: GTK4 + libadwaita (HIG-compliant widgets, theming, about dialog).
+gtk = { package = "gtk4", version = "0.9", features = ["v4_10"] }
+adw = { package = "libadwaita", version = "0.7", features = ["v1_5"] }
+# Async HTTP to the Photon REST API (rustls, no OpenSSL).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread"] }
+# Marshal results from the tokio runtime back onto the GTK main thread.
+async-channel = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"

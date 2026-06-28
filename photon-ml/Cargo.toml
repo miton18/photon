@@ -1,0 +1,48 @@
+[package]
+name = "photon-ml"
+version = "1.0.0"
+edition = "2021"
+description = "Photon ML sidecar — CLIP embeddings + OCR + face detection over HTTP, pure Rust (ONNX Runtime via ort + ocrs)."
+publish = false
+
+[[bin]]
+name = "photon-ml"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server (matches the rest of the project; the server uses axum 0.8 too).
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Image decoding + preprocessing for CLIP and faces.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif", "tiff"] }
+
+# ONNX Runtime bindings (v2). `download-binaries` fetches the onnxruntime shared
+# library at build time so no system lib is required; `ndarray` enables ndarray
+# interop used when building input tensors.
+ort = { version = "=2.0.0-rc.10", default-features = false, features = [
+    "std",
+    "download-binaries",
+    "ndarray",
+] }
+ndarray = "0.16"
+
+# Pure-Rust OCR (its own ONNX runtime, `rten`, independent of ort).
+ocrs = "0.12"
+rten = "0.24"
+
+# CLIP text tokenizer (BPE, ships the CLIP vocab/merges).
+instant-clip-tokenizer = "0.1"
+
+anyhow = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

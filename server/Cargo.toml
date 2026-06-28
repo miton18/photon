@@ -1,0 +1,79 @@
+[package]
+name = "photon-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "set-header"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+async-trait = "0.1"
+rust-s3 = { version = "0.35", default-features = false, features = ["tokio-rustls-tls"] }
+kamadak-exif = "0.6"
+libc = "0.2"
+base64 = "0.22"
+# RFC 6902 JSON Patch (operates on serde_json::Value). 3.0.1 is offline-cached.
+json-patch = "3"
+getrandom = "0.2"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder"] }
+argon2 = "0.5"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "macros", "migrate"] }
+jsonwebtoken = "9"
+# CONTEXT RECOGNITION (CLIP): thin HTTP client to the ML embedding sidecar.
+# rustls (no OpenSSL) + json; default features off to avoid the native-tls stack.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+image_hasher = "2"
+# SERVER-SIDE DLNA/UPnP CASTING: async SSDP discovery + AVTransport control over
+# tokio. `full_device_spec` exposes the device UDN (used for a stable device id).
+rupnp = { version = "2", features = ["full_device_spec"] }
+futures-util = "0.3"
+# Gravatar: MD5 of the lowercased email → gravatar.com avatar URL (classic scheme).
+md-5 = "0.10"
+# Durable, Postgres-backed job queue (Graphile Worker port) for ALL background
+# tasks — import enrichment, duplicate detection, S3 backup, trash purge — so jobs
+# survive restarts and any instance can process them. Uses our sqlx/tokio/rustls stack.
+graphile_worker = { version = "0.13", default-features = false, features = ["driver-sqlx", "runtime-tokio", "tls-rustls"] }
+chrono = "0.4"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+# RFC-6238 TOTP two-factor auth: secret generation, code verification (±step
+# skew), and otpauth:// URIs for authenticator QR enrollment. Pure-Rust (no
+# OpenSSL); the `otpauth` feature enables issuer/account-name labels in the URI.
+totp-rs = { version = "5", default-features = false, features = ["otpauth"] }
+# WebAuthn / passkeys (passwordless sign-in). `danger-allow-state-serialisation`
+# lets us persist the short-lived, single-use registration/authentication
+# challenge state in Postgres (mirroring `oidc_states`) so the begin/finish
+# ceremony is multi-instance safe. "danger" only warns against trusting
+# CLIENT-supplied state — ours is server-generated, single-use and TTL'd, never
+# trusted from the wire, so this is the intended safe usage.
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation", "conditional-ui"] }
+# SUBPROCESS PLUGINS (go-plugin style): the host launches plugin binaries and
+# talks to them over gRPC on a Unix socket. Shares the wire contract with the
+# SDK via the proto crate. UDS (no TLS) so no OpenSSL. Inert unless
+# PHOTON_PLUGINS_DIR is set (mirrors the ML sidecar's offline-by-default gating).
+photon-plugin-proto = { path = "../photon-plugin-proto" }
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = { version = "0.1", features = ["net"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+# `tower::service_fn` for the tonic UDS connector idiom (also drives the auth
+# integration tests via `ServiceExt::oneshot`).
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+# `ServiceExt::oneshot` for driving a full `axum::Router` (with the real auth
+# middleware layered on) through a single request in the auth integration tests.
+tower = { version = "0.5", features = ["util"] }
+
+# Optimize ALL dependencies even in dev/test builds. Image decode/resize/encode
+# (the `image` crate + JPEG/WebP codecs) is catastrophically slow at opt-level 0 —
+# a 20 MP render took ~16s in a debug build. This optimizes dependency code (so
+# codecs run at full speed) while keeping OUR crate at opt-level 0 for fast,
+# debuggable incremental builds.
+[profile.dev.package."*"]
+opt-level = 3

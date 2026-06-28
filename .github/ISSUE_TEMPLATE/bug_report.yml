@@ -1,0 +1,54 @@
+name: 🐞 Bug report
+description: Something in Photon is broken or behaves incorrectly.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! For **feature requests**, please open a
+        [Discussion](../../discussions) instead — this form is for bugs only.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: Steps to reproduce, expected vs. actual behaviour.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      description: Which part of Photon is affected?
+      options:
+        - server (Rust API)
+        - ui (web frontend)
+        - photon-ml (ML sidecar)
+        - mobileapp (Flutter)
+        - a plugin
+        - companion (desktop backup)
+        - not sure
+    validations:
+      required: true
+  - type: input
+    id: how-run
+    attributes:
+      label: How do you run Photon?
+      placeholder: "cargo run / docker compose / ..."
+    validations:
+      required: false
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: "OS, browser (if UI), Postgres version, etc."
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / screenshots
+      description: Paste any relevant logs (server output, browser console) or screenshots.
+      render: shell
+    validations:
+      required: false

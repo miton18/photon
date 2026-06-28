@@ -1,0 +1,28 @@
+/* ============================================================
+   PHOTON — MOTION TOKENS
+   Calm, precise motion. Quick fades + small translations.
+   No bounce; easing is crisp ease-out. Honor reduced-motion.
+   ============================================================ */
+
+:root {
+  --dur-instant: 80ms;  /* @kind other */
+  --dur-fast:    130ms; /* @kind other */
+  --dur-base:    190ms; /* @kind other */
+  --dur-slow:    280ms; /* @kind other */
+  --dur-slower:  440ms; /* @kind other */
+
+  --ease-out:      cubic-bezier(0.22, 0.8, 0.30, 1);   /* @kind other */
+  --ease-standard: cubic-bezier(0.40, 0.00, 0.20, 1);  /* @kind other */
+  --ease-in:       cubic-bezier(0.55, 0.00, 1.00, 0.45); /* @kind other */
+  --ease-emphasis: cubic-bezier(0.16, 1.00, 0.30, 1);  /* @kind other */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-instant: 0ms; /* @kind other */
+    --dur-fast: 0ms;    /* @kind other */
+    --dur-base: 0ms;    /* @kind other */
+    --dur-slow: 0ms;    /* @kind other */
+    --dur-slower: 0ms;  /* @kind other */
+  }
+}

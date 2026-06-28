@@ -1,0 +1,56 @@
+/* ============================================================
+   PHOTON — BASE ELEMENT STYLES
+   Minimal resets + brand defaults applied to bare elements.
+   Tokens come from the other imported files.
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--text-sm);
+  line-height: var(--lh-normal);
+  font-weight: var(--fw-regular);
+  color: var(--text);
+  background: var(--bg-base);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  font-feature-settings: 'cv11', 'ss01';
+}
+
+::selection { background: var(--accent-soft); color: var(--accent-text); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+
+/* Brand scrollbars — thin, neutral, only thumb visible */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--slate-300) transparent;
+}
+.dark * { scrollbar-color: var(--slate-700) transparent; }
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: var(--slate-300);
+  border: 3px solid transparent;
+  border-radius: var(--radius-pill);
+  background-clip: content-box;
+}
+.dark *::-webkit-scrollbar-thumb { background: var(--slate-700); background-clip: content-box; }
+*::-webkit-scrollbar-thumb:hover { background: var(--slate-400); background-clip: content-box; }
+.dark *::-webkit-scrollbar-thumb:hover { background: var(--slate-600); background-clip: content-box; }
+
+/* Typographic helpers used across specimen cards & kits */
+.font-mono { font-family: var(--font-mono); }
+.font-display { font-family: var(--font-display); }
+
+/* Brand spin keyframe (loading spinners on Button, Toast, etc.) */
+@keyframes ph-spin { to { transform: rotate(360deg); } }

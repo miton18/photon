@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Import from Immich — Photon</title>
+<style>
+  :root { --accent:#6366F1; --bg:#0e121b; --surface:#161b26; --border:#26303f; --text:#e7e9ee; --muted:#9aa3b2; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.5 system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  .wrap { max-width:880px; margin:0 auto; padding:28px 20px 60px; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); margin:0 0 22px; }
+  .card { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:18px 20px; margin-bottom:16px; }
+  label { display:block; font-size:12px; color:var(--muted); margin:10px 0 4px; }
+  input, select { width:100%; padding:9px 11px; background:#0c1018; border:1px solid var(--border); border-radius:8px; color:var(--text); font:inherit; }
+  button { font:inherit; font-weight:600; padding:9px 16px; border-radius:8px; border:1px solid var(--border); background:#1d2533; color:var(--text); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; cursor:default; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .muted { color:var(--muted); }
+  .err { color:#f87171; }
+  .ok { color:#34d399; }
+  .list { max-height:300px; overflow:auto; border:1px solid var(--border); border-radius:8px; }
+  .list .it { display:flex; gap:10px; align-items:center; padding:6px 10px; border-bottom:1px solid var(--border); font-size:13px; }
+  .list .it:last-child { border-bottom:0; }
+  .it .fn { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .it .tag { font-size:11px; color:var(--muted); }
+  .map { display:grid; grid-template-columns:1fr auto 1fr; gap:8px 12px; align-items:center; margin-top:8px; }
+  .map .arrow { color:var(--muted); }
+  .step-num { display:inline-grid; place-items:center; width:22px; height:22px; border-radius:50%; background:var(--accent); color:#fff; font-size:12px; margin-right:8px; }
+  .hide { display:none; }
+  progress { width:100%; height:10px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Import from Immich</h1>
+  <p class="sub">Bring photos from a real Immich server into your Photon library. Originals are uploaded as-is; nothing in Immich is modified.</p>
+
+  <!-- Step 1: connect -->
+  <div class="card">
+    <div><span class="step-num">1</span><b>Connect to Immich</b></div>
+    <label for="url">Immich server URL</label>
+    <input id="url" placeholder="https://immich.example.com" autocomplete="off">
+    <label for="key">Immich API key</label>
+    <input id="key" type="password" placeholder="From Immich → Account Settings → API Keys" autocomplete="off">
+    <div class="row" style="margin-top:14px">
+      <button class="primary" id="connectBtn">Connect</button>
+      <span id="connectMsg" class="muted"></span>
+    </div>
+  </div>
+
+  <!-- Step 2: review -->
+  <div class="card hide" id="reviewCard">
+    <div><span class="step-num">2</span><b>Review photos to import</b></div>
+    <p class="muted" id="scanSummary"></p>
+    <div class="row" style="margin:6px 0 10px">
+      <label style="margin:0"><input type="checkbox" id="selAll" checked style="width:auto"> Select all</label>
+      <span class="muted" id="selCount"></span>
+    </div>
+    <div class="list" id="photoList"></div>
+
+    <div id="mapWrap" class="hide">
+      <div style="margin-top:18px"><b>Album mapping</b> <span class="muted">— keep photos organised by pointing each Immich album at a Photon album.</span></div>
+      <div class="map" id="albumMap"></div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <button class="primary" id="importBtn">Import selected</button>
+      <span id="importMsg" class="muted"></span>
+    </div>
+  </div>
+
+  <!-- Step 3: progress/result -->
+  <div class="card hide" id="resultCard">
+    <div><span class="step-num">3</span><b>Import</b></div>
+    <progress id="prog" class="hide" max="100" value="0"></progress>
+    <p id="resultMsg"></p>
+    <div class="list hide" id="failList"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const token = new URLSearchParams(location.search).get('token') || '';
+let SCAN = null; // last scan result
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...(token ? { authorization: 'Bearer ' + token } : {}) },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || (res.status + ' ' + res.statusText));
+  return data;
+}
+const creds = () => ({ immich_url: $('url').value.trim().replace(/\/$/, ''), immich_token: $('key').value.trim() });
+
+$('connectBtn').onclick = async () => {
+  const m = $('connectMsg'); m.className = 'muted'; m.textContent = 'Connecting…';
+  try {
+    const c = creds();
+    if (!c.immich_url || !c.immich_token) throw new Error('Enter the URL and API key.');
+    const r = await api('connect', c);
+    m.className = 'ok'; m.textContent = 'Connected' + (r.user && r.user.email ? ' as ' + r.user.email : '') + ' — scanning…';
+    await scan();
+    m.textContent = 'Connected.';
+  } catch (e) { m.className = 'err'; m.textContent = String(e.message || e); }
+};
+
+async function scan() {
+  SCAN = await api('scan', creds());
+  $('reviewCard').classList.remove('hide');
+  $('scanSummary').textContent = `${SCAN.missing.length} of ${SCAN.total_immich} Immich photos are not yet in Photon.`;
+  // photo list
+  const list = $('photoList'); list.innerHTML = '';
+  SCAN.missing.forEach((p, i) => {
+    const row = document.createElement('label'); row.className = 'it';
+    row.innerHTML = `<input type="checkbox" class="pcb" data-i="${i}" checked style="width:auto">
+      <span class="fn">${p.filename || p.id}</span>
+      <span class="tag">${(p.date || '').slice(0,10)}${p.albums && p.albums.length ? ' · '+p.albums.length+' album(s)' : ''}</span>`;
+    list.appendChild(row);
+  });
+  updateCount();
+  list.addEventListener('change', updateCount);
+  $('selAll').onchange = (e) => { document.querySelectorAll('.pcb').forEach(c => c.checked = e.target.checked); updateCount(); };
+  // album mapping
+  const mapWrap = $('mapWrap'), map = $('albumMap'); map.innerHTML = '';
+  if (SCAN.immich_albums.length) {
+    mapWrap.classList.remove('hide');
+    const opts = ['<option value="">— Don\'t add to an album —</option>',
+      ...SCAN.photon_albums.map(a => `<option value="${a.id}">${a.name}</option>`)];
+    SCAN.immich_albums.forEach(al => {
+      const sel = document.createElement('select'); sel.dataset.im = al.id;
+      sel.innerHTML = opts.join('') + `<option value="new:${encodeURIComponent(al.name)}">＋ Create "${al.name}"</option>`;
+      sel.value = 'new:' + encodeURIComponent(al.name); // default: mirror the Immich album
+      const lbl = document.createElement('div'); lbl.innerHTML = `<b>${al.name}</b> <span class="muted">(${al.missing})</span>`;
+      const arrow = document.createElement('div'); arrow.className = 'arrow'; arrow.textContent = '→';
+      map.appendChild(lbl); map.appendChild(arrow); map.appendChild(sel);
+    });
+  } else { mapWrap.classList.add('hide'); }
+}
+
+function updateCount() {
+  const n = document.querySelectorAll('.pcb:checked').length;
+  $('selCount').textContent = `${n} selected`;
+  $('importBtn').disabled = n === 0;
+}
+
+$('importBtn').onclick = async () => {
+  const chosen = [...document.querySelectorAll('.pcb:checked')].map(c => SCAN.missing[+c.dataset.i]);
+  const album_map = {};
+  document.querySelectorAll('#albumMap select').forEach(s => {
+    let v = s.value;
+    if (v.startsWith('new:')) v = 'new:' + decodeURIComponent(v.slice(4));
+    album_map[s.dataset.im] = v;
+  });
+  $('resultCard').classList.remove('hide'); $('prog').classList.remove('hide');
+  $('prog').removeAttribute('value'); $('resultMsg').textContent = `Importing ${chosen.length} photo(s)…`;
+  $('importBtn').disabled = true;
+  try {
+    const r = await api('import', { ...creds(), items: chosen, album_map });
+    $('prog').classList.add('hide');
+    $('resultMsg').innerHTML = `<span class="ok">Imported ${r.imported} photo(s).</span>` + (r.failed.length ? ` <span class="err">${r.failed.length} failed.</span>` : '');
+    if (r.failed.length) {
+      const fl = $('failList'); fl.classList.remove('hide'); fl.innerHTML = '';
+      r.failed.forEach(f => { const d = document.createElement('div'); d.className = 'it'; d.innerHTML = `<span class="fn">${f.filename}</span><span class="tag err">${f.error}</span>`; fl.appendChild(d); });
+    }
+  } catch (e) {
+    $('prog').classList.add('hide'); $('resultMsg').innerHTML = `<span class="err">${String(e.message || e)}</span>`;
+  } finally { $('importBtn').disabled = false; }
+};
+</script>
+</body>
+</html>

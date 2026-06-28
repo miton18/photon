@@ -1,0 +1,15 @@
+/* ============================================================
+   PHOTON DESIGN SYSTEM — global entry point.
+   Consumers import THIS file. It is an @import manifest only —
+   never put rules here. Everything reachable from these imports
+   ships to consumers (tokens + @font-face).
+   ============================================================ */
+
+@import url('./tokens/fonts.css');
+@import url('./tokens/colors.css');
+@import url('./tokens/typography.css');
+@import url('./tokens/spacing.css');
+@import url('./tokens/elevation.css');
+@import url('./tokens/motion.css');
+@import url('./tokens/base.css');
+@import url('./kit.css');

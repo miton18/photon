@@ -1,0 +1,37 @@
+# ── Rust build artifacts ──────────────────────────────────────────────
+# NOT a Cargo workspace: every crate (server, photon-ml, photon-plugin-*,
+# plugins/*, companion) has its own target/. Ignore them all, at any depth.
+target/
+
+# ── Node / Vite (ui) ──────────────────────────────────────────────────
+node_modules/
+/ui/dist/
+/ui/.vite/
+
+# ── Flutter / Dart (mobileapp) ────────────────────────────────────────
+/mobileapp/.dart_tool/
+/mobileapp/build/
+/mobileapp/.flutter-plugins
+/mobileapp/.flutter-plugins-dependencies
+
+# ── Runtime data — NEVER COMMIT ───────────────────────────────────────
+# User-uploaded originals, thumbnails, companions (RAW), and test-plugin
+# binaries written by a running instance. Contains personal photos. A `data/`
+# dir is created wherever the server/ui is launched (PHOTON_DATA_DIR defaults
+# to ./data), so ignore it at ANY depth — root, server/, ui/, etc.
+data/
+
+# ── ML model blobs ────────────────────────────────────────────────────
+# Operator-supplied, large (hundreds of MB), permissively licensed but not
+# ours to redistribute. Fetched via photon-ml/fetch-models.sh.
+/photon-ml/models/
+
+# ── Private / non-public working notes (kept out of the public repo) ──
+*FEATURE_DIFF.md
+
+# ── Env & editors ─────────────────────────────────────────────────────
+.env
+.env.local
+.env.*.local
+.DS_Store
+*.log

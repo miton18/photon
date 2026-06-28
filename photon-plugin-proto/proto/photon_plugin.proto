@@ -1,0 +1,128 @@
+syntax = "proto3";
+package photon.plugin.v1;
+
+// ---- Base service: every plugin implements this (handshake + liveness) ----
+service Plugin {
+  rpc Info(InfoRequest) returns (PluginInfo);
+  rpc Health(HealthRequest) returns (HealthStatus);
+}
+
+message InfoRequest {}
+message PluginInfo {
+  string id = 1;                 // stable identifier, e.g. "hello"
+  string name = 2;               // human-readable display name
+  string version = 3;
+  uint32 protocol_version = 4;   // must match the host's PROTOCOL_VERSION
+  repeated Capability capabilities = 5;
+}
+enum Capability {
+  CAPABILITY_UNSPECIFIED = 0;
+  EDITOR = 1;
+  ROUTE = 2;
+  JOB = 3;
+}
+message HealthRequest {}
+message HealthStatus { bool ok = 1; string detail = 2; }
+
+// ---- Editor: photo-editing operations (bytes in -> bytes out) ----
+service Editor {
+  rpc ListOps(ListOpsRequest) returns (ListOpsResponse);
+  rpc ApplyOp(ApplyOpRequest) returns (ApplyOpResponse);
+}
+message ListOpsRequest {}
+message OpParam {
+  string name = 1;
+  string label = 2;
+  enum Kind { STRING = 0; INT = 1; FLOAT = 2; BOOL = 3; ENUM = 4; }
+  Kind kind = 3;
+  string default = 4;
+  repeated string enum_values = 5;
+  optional double min = 6;
+  optional double max = 7;
+}
+message EditorOp {
+  string id = 1;
+  string label = 2;
+  string description = 3;
+  repeated OpParam params = 4;
+}
+message ListOpsResponse { repeated EditorOp ops = 1; }
+message ApplyOpRequest {
+  string op_id = 1;
+  bytes image = 2;
+  string content_type = 3;
+  map<string, string> params = 4;
+}
+message ApplyOpResponse {
+  bytes image = 1;
+  string content_type = 2;
+}
+
+// ---- Route: complementary web pages / API endpoints (HTTP over gRPC) ----
+service Route {
+  rpc ListRoutes(ListRoutesRequest) returns (ListRoutesResponse);
+  rpc Handle(HttpRequest) returns (HttpResponse);
+}
+message ListRoutesRequest {}
+message RouteDecl { string method = 1; string path = 2; }
+message ListRoutesResponse { repeated RouteDecl routes = 1; }
+message HttpRequest {
+  string method = 1;
+  string path = 2;               // sub-path AFTER /api/plugins/{name}
+  string query = 3;
+  map<string, string> headers = 4;
+  bytes body = 5;
+  string actor = 6;              // authenticated user id (host fills it)
+  bool is_admin = 7;
+}
+message HttpResponse {
+  uint32 status = 1;
+  map<string, string> headers = 2;
+  bytes body = 3;
+}
+
+// ---- Job: new background jobs ----
+service Job {
+  rpc ListJobs(ListJobsRequest) returns (ListJobsResponse);
+  // Server-streaming: the plugin emits zero or more JobProgress updates as it
+  // works, then exactly one terminal JobResult. The stream ends after JobResult.
+  rpc RunJob(RunJobRequest) returns (stream RunJobUpdate);
+}
+message ListJobsRequest {}
+message JobDecl {
+  string id = 1;                 // stable identifier, e.g. "hello_sweep"
+  string name = 2;               // human-readable display name
+  string description = 3;
+  uint32 schedule_secs = 4;      // run every N seconds (0 = manual only)
+}
+message ListJobsResponse { repeated JobDecl jobs = 1; }
+message RunJobRequest {
+  string name = 1;
+  string trigger = 2;            // "cron" | "manual"
+}
+
+// One declared step of a multi-step job, with its live state.
+message JobStep {
+  string name = 1;
+  enum State { PENDING = 0; RUNNING = 1; DONE = 2; FAILED = 3; }
+  State state = 2;
+  uint32 percent = 3;            // 0..100 within this step (meaningful while RUNNING)
+}
+// A progress snapshot: the full step list + which one is current.
+message JobProgress {
+  repeated JobStep steps = 1;
+  uint32 current = 2;            // index into `steps` of the step in progress
+}
+// Terminal outcome of a job run (was RunJobResponse).
+message JobResult {
+  bool success = 1;
+  int64 items = 2;
+  string result = 3;
+}
+// One streamed update: either a progress snapshot or the terminal result.
+message RunJobUpdate {
+  oneof update {
+    JobProgress progress = 1;
+    JobResult result = 2;
+  }
+}

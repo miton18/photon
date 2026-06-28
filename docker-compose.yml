@@ -1,0 +1,100 @@
+# Photon — full stack: Postgres + Rust server + Svelte UI.
+#   docker compose up --build
+#   UI       → http://localhost:8080
+#   API      → http://localhost:3000
+#   Postgres → localhost:5432  (photon/photon)
+services:
+  db:
+    # pgvector image (Postgres 17 + the `vector` extension) for CLIP embeddings.
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: photon
+      POSTGRES_PASSWORD: photon
+      POSTGRES_DB: photon
+    ports:
+      - "5432:5432"
+    #volumes:
+    #  - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U photon -d photon"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  server:
+    # Built from the REPO ROOT (not ./server): the server crate path-depends on
+    # ../photon-plugin-proto, and the Dockerfile also builds the example plugin
+    # binaries into /plugins (baked in, discovered via PHOTON_PLUGINS_DIR).
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    environment:
+      # Postgres for all domain data; falls back to in-memory if the server
+      # build doesn't yet use the DB (see task: Postgres persistence).
+      DATABASE_URL: postgres://photon:photon@db:5432/photon
+      RUST_LOG: info,tower_http=debug
+      PHOTON_DATA_DIR: /data
+      # SUBPROCESS PLUGINS: the image bakes the example plugin binaries here. The
+      # server launches them on startup (jobs/routes/editor ops). Unset to disable.
+      PHOTON_PLUGINS_DIR: /plugins
+      # CONTEXT RECOGNITION (CLIP): point the server at the ML sidecar to enable
+      # photo embedding + semantic search. Remove this var to run keyword-only.
+      PHOTON_ML_URL: http://photon-ml:8000
+    ports:
+      - "3000:3000"
+    #volumes:
+    #  - media:/data
+    depends_on:
+      db:
+        condition: service_healthy
+      photon-ml:
+        condition: service_started
+
+  # CONTEXT RECOGNITION (CLIP) sidecar — pure-Rust axum service over HTTP.
+  # Inference runs on ONNX Runtime (the `ort` crate) for CLIP + faces and the
+  # `ocrs` crate for OCR. Models (ONNX / .rten files) are loaded once at startup
+  # from PHOTON_ML_MODELS_DIR (/models) — mount them via the `models` volume or
+  # bake them into the image (see photon-ml/fetch-models.sh + README).
+  # Switch models WITHOUT code changes via the *_MODEL file-name env vars below;
+  # the embedding dim is auto-detected and reported by GET /health.
+  #   ViT-B-32 ONNX encoders -> dim 512 (default, light)
+  # NOTE: a different dim needs the pgvector column dim updated (migration) +
+  # re-embedding. In-memory cosine search adapts automatically. A missing model
+  # file does NOT crash the service — that capability is reported as not loaded
+  # by /health and its endpoint returns 503.
+  photon-ml:
+    build: ./photon-ml
+    environment:
+      # Directory the ONNX / .rten model files are loaded from.
+      PHOTON_ML_MODELS_DIR: /models
+      # CLIP name reported by /health; encoder ONNX file names are overridable
+      # via PHOTON_CLIP_IMAGE_MODEL / PHOTON_CLIP_TEXT_MODEL.
+      PHOTON_CLIP_MODEL: ViT-B-32
+      # OCR (ocrs) recognition languages, comma-separated ISO codes (reported by
+      # /health). Model files: PHOTON_OCR_DETECTION_MODEL / *_RECOGNITION_MODEL.
+      PHOTON_OCR_LANGS: en,fr
+      # FACE pack reported by /health: the AuraFace pack (Apache-2.0, commercial) —
+      # SCRFD detection + ArcFace 512-d embedding. Files:
+      # PHOTON_FACE_DETECTION_MODEL / *_RECOGNITION_MODEL (scrfd.onnx / auraface.onnx).
+      PHOTON_FACE_MODEL: auraface
+    volumes:
+      - models:/models
+    ports:
+      - "8000:8000"
+
+  ui:
+    build:
+      context: ./ui
+      args:
+        # the browser runs on the host, so it reaches the API at localhost:3000
+        VITE_API_URL: http://localhost:3000
+    ports:
+      - "8080:80"
+    depends_on:
+      - server
+
+volumes:
+  pgdata:
+  media:
+  # ONNX / .rten model files for the photon-ml sidecar (CLIP + OCR + faces).
+  models:

@@ -1,0 +1,13 @@
+[package]
+name = "photon-plugin-proto"
+version = "0.1.0"
+# Generated tonic/prost code is edition-agnostic; keep 2021 to dodge any
+# edition-2024 codegen edge cases (the workspace server crate is on 2024).
+edition = "2021"
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+
+[build-dependencies]
+tonic-build = "0.12"

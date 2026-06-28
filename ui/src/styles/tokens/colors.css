@@ -1,0 +1,129 @@
+/* ============================================================
+   PHOTON — COLOR TOKENS  ·  Direction: "Slate"
+   Cool blue-slate neutrals + electric indigo accent.
+   Light is the :root base; dark is the .dark single-selector scope.
+   Both themes are first-class (parity).
+   ============================================================ */
+
+:root {
+  /* ---- Raw neutral scale (cool slate) ---- */
+  --slate-25:  #FBFCFD;
+  --slate-50:  #F6F7FA;
+  --slate-100: #EDEFF4;
+  --slate-150: #E2E6EE;
+  --slate-200: #D5DAE5;
+  --slate-300: #B6BECE;
+  --slate-400: #8B93A7;
+  --slate-500: #677085;
+  --slate-600: #4D566B;
+  --slate-700: #353D4F;
+  --slate-800: #232a39;
+  --slate-850: #1A2030;
+  --slate-900: #141926;
+  --slate-925: #11151F;
+  --slate-950: #0B0E15;
+  --slate-975: #070910;
+
+  /* ---- Brand: electric indigo ---- */
+  --indigo-50:  #EEF0FF;
+  --indigo-100: #E0E2FF;
+  --indigo-200: #C7CBFF;
+  --indigo-300: #A5B4FC;
+  --indigo-400: #818CF8;
+  --indigo-500: #6366F1;   /* primary accent */
+  --indigo-600: #4F46E5;
+  --indigo-700: #4338CA;
+  --indigo-800: #362FA0;
+
+  /* ---- Functional hues ---- */
+  --green-400: #34D399;  --green-500: #10B981;  --green-600: #059669;
+  --amber-400: #FBBF24;  --amber-500: #F59E0B;  --amber-600: #D97706;
+  --red-400:   #F87171;  --red-500:   #EF4444;  --red-600:   #DC2626;
+  --sky-400:   #38BDF8;  --sky-500:   #0EA5E9;
+
+  /* ===================================================
+     SEMANTIC ALIASES — LIGHT (default)
+     =================================================== */
+  --bg-base:        var(--slate-50);    /* app canvas */
+  --bg-subtle:      var(--slate-100);   /* inset / wells */
+  --surface:        #FFFFFF;            /* cards, sidebars, bars */
+  --surface-2:      var(--slate-50);    /* nested surface */
+  --surface-hover:  var(--slate-100);
+  --surface-active: var(--slate-150);
+  --photo-bg:       var(--slate-200);   /* thumbnail placeholder */
+
+  --border:         rgba(20, 25, 38, 0.10);
+  --border-strong:  rgba(20, 25, 38, 0.16);
+  --border-faint:   rgba(20, 25, 38, 0.06);
+
+  --text:           var(--slate-900);
+  --text-muted:     var(--slate-500);
+  --text-faint:     var(--slate-400);
+  --text-on-accent: #FFFFFF;
+  --text-on-photo:  #FFFFFF;
+
+  --accent:         var(--indigo-500);
+  --accent-hover:   var(--indigo-600);
+  --accent-active:  var(--indigo-700);
+  --accent-fg:      #FFFFFF;
+  --accent-soft:    var(--indigo-50);   /* tinted bg behind accent text */
+  --accent-soft-bd: var(--indigo-200);
+  --accent-text:    var(--indigo-600);  /* accent-colored text on light */
+
+  --success:        var(--green-600);
+  --success-soft:   #E7F7F0;
+  --warning:        var(--amber-600);
+  --warning-soft:   #FDF3E0;
+  --danger:         var(--red-600);
+  --danger-soft:    #FCEBEB;
+  --info:           var(--sky-500);
+
+  /* overlays / scrims */
+  --scrim:          rgba(11, 14, 21, 0.55);
+  --scrim-strong:   rgba(7, 9, 16, 0.82);
+  --photo-grad:     linear-gradient(to top, rgba(7,9,16,.55), transparent 60%); /* @kind other */
+
+  color-scheme: light;
+}
+
+.dark {
+  --bg-base:        var(--slate-950);
+  --bg-subtle:      var(--slate-925);
+  --surface:        var(--slate-900);
+  --surface-2:      var(--slate-850);
+  --surface-hover:  rgba(255, 255, 255, 0.04);
+  --surface-active: rgba(255, 255, 255, 0.07);
+  --photo-bg:       var(--slate-800);
+
+  --border:         rgba(255, 255, 255, 0.08);
+  --border-strong:  rgba(255, 255, 255, 0.14);
+  --border-faint:   rgba(255, 255, 255, 0.05);
+
+  --text:           var(--slate-100);
+  --text-muted:     var(--slate-400);
+  --text-faint:     var(--slate-500);
+  --text-on-accent: #FFFFFF;
+  --text-on-photo:  #FFFFFF;
+
+  --accent:         var(--indigo-500);
+  --accent-hover:   var(--indigo-400);
+  --accent-active:  var(--indigo-300);
+  --accent-fg:      #FFFFFF;
+  --accent-soft:    rgba(99, 102, 241, 0.14);
+  --accent-soft-bd: rgba(99, 102, 241, 0.30);
+  --accent-text:    var(--indigo-300);
+
+  --success:        var(--green-400);
+  --success-soft:   rgba(16, 185, 129, 0.14);
+  --warning:        var(--amber-400);
+  --warning-soft:   rgba(245, 158, 11, 0.14);
+  --danger:         var(--red-400);
+  --danger-soft:    rgba(239, 68, 68, 0.14);
+  --info:           var(--sky-400);
+
+  --scrim:          rgba(7, 9, 16, 0.62);
+  --scrim-strong:   rgba(3, 4, 9, 0.86);
+  --photo-grad:     linear-gradient(to top, rgba(3,4,9,.7), transparent 60%); /* @kind other */
+
+  color-scheme: dark;
+}

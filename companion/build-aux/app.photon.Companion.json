@@ -1,0 +1,36 @@
+{
+  "app-id": "app.photon.Companion",
+  "runtime": "org.gnome.Platform",
+  "runtime-version": "47",
+  "sdk": "org.gnome.Sdk",
+  "sdk-extensions": ["org.freedesktop.Sdk.Extension.rust-stable"],
+  "command": "photon-companion",
+  "finish-args": [
+    "--share=ipc",
+    "--socket=fallback-x11",
+    "--socket=wayland",
+    "--device=dri",
+    "--share=network",
+    "--filesystem=xdg-pictures:ro"
+  ],
+  "build-options": {
+    "append-path": "/usr/lib/sdk/rust-stable/bin"
+  },
+  "modules": [
+    {
+      "name": "photon-companion",
+      "buildsystem": "simple",
+      "build-commands": [
+        "cargo --offline fetch --manifest-path Cargo.toml --verbose || true",
+        "cargo --offline build --release",
+        "install -Dm755 target/release/photon-companion /app/bin/photon-companion",
+        "install -Dm644 data/app.photon.Companion.desktop /app/share/applications/app.photon.Companion.desktop",
+        "install -Dm644 data/app.photon.Companion.metainfo.xml /app/share/metainfo/app.photon.Companion.metainfo.xml",
+        "install -Dm644 data/icons/hicolor/scalable/apps/app.photon.Companion.svg /app/share/icons/hicolor/scalable/apps/app.photon.Companion.svg"
+      ],
+      "sources": [
+        { "type": "dir", "path": "." }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,21 @@
+[package]
+name = "immich-import"
+version = "0.1.0"
+edition = "2021"
+
+# Web (Route) plugin: a wizard to import photos from a real Immich server into
+# Photon. NOTE: this plugin INTENTIONALLY references Immich by name — it is an
+# interop/import tool for a real Immich instance, explicitly authorized as an
+# exception to the product's "no Immich references" rule (which still holds for
+# the core product). It talks the Immich REST API and imports via Photon's own
+# upload endpoint AS THE CALLING USER (the host forwards the user's bearer token),
+# so imported photos are owned by that user and land in the mapped albums.
+
+[dependencies]
+photon-plugin-sdk = { path = "../../photon-plugin-sdk" }
+photon-plugin-proto = { path = "../../photon-plugin-proto" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
