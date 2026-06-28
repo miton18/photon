@@ -197,8 +197,8 @@ async fn faces(State(state): State<AppState>, body: Bytes) -> Response {
         Ok(found) => {
             let faces: Vec<_> = found
                 .into_iter()
-                .map(|(bbox, embedding, score)| {
-                    json!({ "bbox": bbox, "embedding": embedding, "score": score })
+                .map(|f| {
+                    json!({ "bbox": f.bbox, "embedding": f.embedding, "score": f.score })
                 })
                 .collect();
             Json(json!({ "faces": faces })).into_response()

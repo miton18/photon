@@ -70,6 +70,15 @@ struct Detection {
     score: f32,
 }
 
+/// One detected + embedded face in ORIGINAL-image coordinates: the `bbox` as
+/// `[x, y, w, h]` pixels, the L2-normalized ArcFace `embedding`, and the
+/// detector confidence `score`.
+pub struct DetectedFace {
+    pub bbox: [f32; 4],
+    pub embedding: Vec<f32>,
+    pub score: f32,
+}
+
 impl Faces {
     pub fn try_load(detection_path: &Path, recognition_path: &Path) -> Result<Option<Self>> {
         if !detection_path.exists() || !recognition_path.exists() {
@@ -84,8 +93,8 @@ impl Faces {
         }))
     }
 
-    /// Detect faces and embed each one. Returns `(bbox[x,y,w,h], embedding, score)`.
-    pub fn detect(&self, bytes: &[u8]) -> Result<Vec<([f32; 4], Vec<f32>, f32)>> {
+    /// Detect faces and embed each one, one [`DetectedFace`] per face.
+    pub fn detect(&self, bytes: &[u8]) -> Result<Vec<DetectedFace>> {
         let img = image::load_from_memory(bytes)
             .context("decoding image")?
             .to_rgb8();
@@ -115,7 +124,11 @@ impl Faces {
                 continue;
             }
             let emb = self.embed_face(&img, x1, y1, w, h)?;
-            out.push(([x1, y1, w, h], emb, d.score));
+            out.push(DetectedFace {
+                bbox: [x1, y1, w, h],
+                embedding: emb,
+                score: d.score,
+            });
         }
         Ok(out)
     }
