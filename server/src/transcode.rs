@@ -640,7 +640,7 @@ mod tests {
         let decoded = image::load_from_memory(&out).expect("decode webp output");
         use image::GenericImageView;
         let (w, _h) = decoded.dimensions();
-        assert!(w <= 50 && w >= 40, "expected ~50px wide, got {w}");
+        assert!((40..=50).contains(&w), "expected ~50px wide, got {w}");
     }
 
     #[test]

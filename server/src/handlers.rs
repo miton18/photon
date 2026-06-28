@@ -9,7 +9,7 @@ use axum::{
 };
 use tokio::sync::RwLock;
 
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, DbOptionExt, DbResultExt};
 
 use crate::models::{
     AcceptInvite, AddMember, AddPhotos, Album, ContributeBody, CreateAlbum, CreateGroup,
@@ -39,11 +39,12 @@ pub async fn request_snapshot(shared: &Shared) -> Option<AppState> {
     {
         let st = shared.read().await;
         st.persistence.as_ref()?; // no DB → None → caller uses in-memory fallback
+        let ctx = st.storage_ctx();
         snap.persistence = st.persistence.clone();
         snap.password_secret = st.password_secret.clone();
-        snap.storage = st.storage.clone();
+        snap.storage = ctx.storage;
         snap.smtp = st.smtp.clone();
-        snap.data_dir = st.data_dir.clone();
+        snap.data_dir = ctx.data_dir;
         snap.ml = st.ml.clone();
     }
     snap.load_from_db().await.ok()?;
@@ -96,9 +97,9 @@ pub async fn get_user(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<User>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let user = p.get_user(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let user = user.ok_or(StatusCode::NOT_FOUND)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let user = p.get_user(&id).await.or_500()?;
+    let user = user.or_404()?;
     Ok(Json(st.read().await.public_user(&user)))
 }
 
@@ -109,8 +110,8 @@ pub async fn create_user(
     State(st): State<Shared>,
     Json(body): Json<CreateUser>,
 ) -> Result<(StatusCode, Json<User>), StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let id = p.next_id("usr").await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let id = p.next_id("usr").await.or_500()?;
     let user = User {
         id,
         name: body.name,
@@ -125,7 +126,7 @@ pub async fn create_user(
         partners: Vec::new(),
         totp_secret: None,
     };
-    p.upsert_user(&user).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.upsert_user(&user).await.or_500()?;
     Ok((StatusCode::CREATED, Json(user)))
 }
 
@@ -140,7 +141,7 @@ pub async fn register(
     State(st): State<Shared>,
     Json(body): Json<RegisterBody>,
 ) -> Result<(StatusCode, Json<User>), StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Feature gate: read the flag straight from the settings singleton.
     let features = p.load_storage().await.ok().flatten().unwrap_or_default().features;
     if !features.public_signup {
@@ -151,13 +152,13 @@ pub async fn register(
     let taken = p
         .load_users()
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .or_500()?
         .into_iter()
         .any(|u| u.email.to_ascii_lowercase() == email_lc);
     if taken {
         return Err(StatusCode::CONFLICT);
     }
-    let id = p.next_id("usr").await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let id = p.next_id("usr").await.or_500()?;
     // Hash the password with the server-wide secret + a fresh CSPRNG pepper,
     // exactly as `set_user_password`/`User::set_password` do.
     let secret = st.read().await.password_secret().to_vec();
@@ -177,7 +178,7 @@ pub async fn register(
         totp_secret: None,
     };
     user.set_password(&secret, pepper, &body.password);
-    p.upsert_user(&user).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.upsert_user(&user).await.or_500()?;
     // Return the PUBLIC user (secrets are `skip_serializing`, but mirror
     // `create_user`'s shape of returning the created `User`).
     Ok((StatusCode::CREATED, Json(user)))
@@ -200,19 +201,19 @@ pub async fn update_user(
     Path(id): Path<String>,
     Json(ops): Json<json_patch::Patch>,
 ) -> Result<Json<User>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first, ONE transaction: lock the row, apply the JSON Patch to
     // the 5 patchable profile fields, write back.
     use sqlx::Row as _;
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     let row = sqlx::query(
         "SELECT name, email, is_admin, disabled, quota_mb FROM users WHERE id = $1 FOR UPDATE",
     )
     .bind(&id)
     .fetch_optional(&mut *tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    .ok_or(StatusCode::NOT_FOUND)?;
+    .or_500()?
+    .or_404()?;
     let mut doc = serde_json::json!({
         "name": row.get::<String, _>("name"),
         "email": row.get::<String, _>("email"),
@@ -241,11 +242,11 @@ pub async fn update_user(
     .bind(quota)
     .execute(&mut *tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .or_500()?;
+    tx.commit().await.or_500()?;
     let user = p.get_user(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(user))
 }
 
@@ -255,10 +256,10 @@ pub async fn delete_user(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first: delete the user + its vault/prefs, then strip the user
     // from group memberships and album shares.
-    if p.get_user(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+    if p.get_user(&id).await.or_500()?.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
     let _ = p.delete_user(&id).await;
@@ -292,20 +293,20 @@ pub async fn add_partner(
     if body.partner_id == id {
         return Err(StatusCode::BAD_REQUEST);
     }
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     if p.get_user(&id).await.ok().flatten().is_none()
         || p.get_user(&body.partner_id).await.ok().flatten().is_none()
     {
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT partners FROM users WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut partners: Vec<String> =
         serde_json::from_value(row.get("partners")).unwrap_or_default();
     if !partners.contains(&body.partner_id) {
@@ -316,11 +317,11 @@ pub async fn add_partner(
         .bind(serde_json::to_value(&partners).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let user = p.get_user(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(user))
 }
 
@@ -331,15 +332,15 @@ pub async fn remove_partner(
     State(st): State<Shared>,
     Path((id, partner_id)): Path<(String, String)>,
 ) -> Result<Json<User>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT partners FROM users WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut partners: Vec<String> =
         serde_json::from_value(row.get("partners")).unwrap_or_default();
     partners.retain(|x| x != &partner_id);
@@ -348,11 +349,11 @@ pub async fn remove_partner(
         .bind(serde_json::to_value(&partners).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let user = p.get_user(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(user))
 }
 
@@ -365,7 +366,7 @@ pub async fn set_user_password(
     Path(id): Path<String>,
     Json(body): Json<SetPasswordBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -431,7 +432,7 @@ pub async fn reset_user_password(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     // Gather email + mailer + token under the lock, then send after dropping it.
     let (email, token, mailer) = {
-        let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut snap = request_snapshot(&st).await.or_500()?;
         let st: &mut AppState = &mut snap;
         let email = match st.users.get(&id) {
             Some(u) => u.email.clone(),
@@ -477,7 +478,7 @@ pub async fn list_groups(
     };
     let mut groups: Vec<Group> = all
         .into_iter()
-        .filter(|g| g.owner_id == actor.0 || g.member_ids.iter().any(|m| *m == actor.0))
+        .filter(|g| g.owner_id == actor.0 || g.member_ids.contains(&actor.0))
         .collect();
     groups.sort_by(|a, b| a.id.cmp(&b.id));
     Json(groups)
@@ -492,18 +493,18 @@ pub async fn create_group(
     if body.owner_id != actor.0 {
         return Err(StatusCode::FORBIDDEN);
     }
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    if p.get_user(&body.owner_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+    let p = st.read().await.persistence.clone().or_500()?;
+    if p.get_user(&body.owner_id).await.or_500()?.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let id = p.next_id("grp").await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let id = p.next_id("grp").await.or_500()?;
     let group = Group {
         id,
         name: body.name,
         owner_id: body.owner_id,
         member_ids: body.member_ids,
     };
-    p.upsert_group(&group).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.upsert_group(&group).await.or_500()?;
     Ok((StatusCode::CREATED, Json(group)))
 }
 
@@ -511,9 +512,9 @@ pub async fn get_group(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<Group>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let group = p.get_group(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    group.map(Json).ok_or(StatusCode::NOT_FOUND)
+    let p = st.read().await.persistence.clone().or_500()?;
+    let group = p.get_group(&id).await.or_500()?;
+    group.map(Json).or_404()
 }
 
 pub async fn add_group_member(
@@ -521,18 +522,18 @@ pub async fn add_group_member(
     Path(id): Path<String>,
     Json(body): Json<AddMember>,
 ) -> Result<Json<Group>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     if p.get_user(&body.user_id).await.ok().flatten().is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT member_ids FROM groups WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut members: Vec<String> =
         serde_json::from_value(row.get("member_ids")).unwrap_or_default();
     if !members.contains(&body.user_id) {
@@ -543,11 +544,11 @@ pub async fn add_group_member(
         .bind(serde_json::to_value(&members).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let group = p.get_group(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(group))
 }
 
@@ -555,15 +556,15 @@ pub async fn remove_group_member(
     State(st): State<Shared>,
     Path((id, user_id)): Path<(String, String)>,
 ) -> Result<Json<Group>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT member_ids FROM groups WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut members: Vec<String> =
         serde_json::from_value(row.get("member_ids")).unwrap_or_default();
     members.retain(|m| m != &user_id);
@@ -572,11 +573,11 @@ pub async fn remove_group_member(
         .bind(serde_json::to_value(&members).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let group = p.get_group(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(group))
 }
 
@@ -584,7 +585,7 @@ pub async fn delete_group(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     if st.groups.remove(&id).is_none() {
         return Err(StatusCode::NOT_FOUND);
@@ -628,9 +629,9 @@ pub async fn get_photo(
 ) -> Result<Json<PhotoView>, StatusCode> {
     // Postgres-first: read the photo in a transaction (one SELECT). Lock touched
     // only to grab the pool handle; in-memory fallback for the no-DB test path.
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let photo = p.get_photo(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    photo.map(|p| Json(p.effective())).ok_or(StatusCode::NOT_FOUND)
+    let p = st.read().await.persistence.clone().or_500()?;
+    let photo = p.get_photo(&id).await.or_500()?;
+    photo.map(|p| Json(p.effective())).or_404()
 }
 
 /// PATCH /api/photos/{id}/metadata
@@ -649,17 +650,17 @@ pub async fn patch_photo_metadata(
     Path(id): Path<String>,
     Json(ops): Json<json_patch::Patch>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first, ONE transaction: lock the row, apply the JSON Patch to
     // its overrides, write back, commit.
     use sqlx::Row as _;
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     let row = sqlx::query("SELECT overrides FROM photos WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let row = row.ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?;
+    let row = row.or_404()?;
     let mut doc: serde_json::Value = row.get("overrides");
     json_patch::patch(&mut doc, &ops).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
     let next: MetadataOverride =
@@ -672,11 +673,11 @@ pub async fn patch_photo_metadata(
         .bind(serde_json::to_value(&next).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let photo = p.get_photo(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(photo.effective()))
 }
 
@@ -754,7 +755,7 @@ pub async fn upload_raw(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     {
         // Postgres-first, STAGED import. The POST does the fast + durable part
         // synchronously — STAGE 1 Upload + STAGE 2 EXIF/Create, then stores the
@@ -763,8 +764,8 @@ pub async fn upload_raw(
         // run in a background task that persists the batch after each stage, so the
         // polling `GET /api/uploads/{id}` shows real per-stage progression. Ids come
         // from a DB-reserved block so they're cluster-unique.
-        let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        let base = p.next_id_base().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut snap = request_snapshot(&st).await.or_500()?;
+        let base = p.next_id_base().await.or_500()?;
         snap.seed_id_counter(base);
         if !snap.users.contains_key(&body.owner_id) {
             return Err(StatusCode::NOT_FOUND);
@@ -865,7 +866,7 @@ pub async fn upload_file(
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(body.bytes.as_bytes())
         .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let pool = st.read().await.persistence.clone().or_500()?;
     let pool2 = pool.clone();
     let filename = body.filename.clone();
     let ext = filename
@@ -882,7 +883,7 @@ pub async fn upload_file(
     // CONTRIBUTE to — central authz doesn't fire on `/api/uploads`, so enforce it
     // here, before the heavy ingest, to stop album injection into a foreign album.
     if let Some(al) = &album_id {
-        let snap0 = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let snap0 = request_snapshot(&st).await.or_500()?;
         if !snap0.albums.contains_key(al) {
             return Err(StatusCode::NOT_FOUND);
         }
@@ -918,7 +919,7 @@ pub async fn upload_file(
             Some((id, view, needs_faces, feat))
         })
         .await;
-    let (id, view, needs_faces, feat_faces) = result.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (id, view, needs_faces, feat_faces) = result.or_500()?;
 
     // Detect faces off the request path. Prefer a DURABLE graphile job (retried,
     // survives a restart, claimed once across the cluster); fall back to an inline
@@ -956,9 +957,9 @@ pub async fn get_import(
     Extension(actor): Extension<AuthUser>,
     Path(batch_id): Path<String>,
 ) -> Result<Json<ImportBatch>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let batch = p.get_import_batch(&batch_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let batch = batch.ok_or(StatusCode::NOT_FOUND)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let batch = p.get_import_batch(&batch_id).await.or_500()?;
+    let batch = batch.or_404()?;
     // Ownership check IN the handler: import batches aren't loaded into the
     // request snapshot, so `resource_authz`'s `/api/uploads/{id}` arm fails open
     // (sees an empty `imports` map). Enforce here — only the batch owner (or an
@@ -997,12 +998,12 @@ pub async fn analyze_photo(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     if !st.analyze_photo(&id) {
         return Err(StatusCode::NOT_FOUND);
     }
-    let view = st.photos.get(&id).map(|p| p.effective()).ok_or(StatusCode::NOT_FOUND)?;
+    let view = st.photos.get(&id).map(|p| p.effective()).or_404()?;
     st.persist_photo(&id).await;
     Ok(Json(view))
 }
@@ -1014,10 +1015,10 @@ pub async fn trash_photo(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     let photo = p.set_photo_deleted_at(&id, Some(now_rfc3339())).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(photo.effective()))
 }
 
@@ -1026,10 +1027,10 @@ pub async fn restore_photo(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     let photo = p.set_photo_deleted_at(&id, None).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(photo.effective()))
 }
 
@@ -1038,10 +1039,10 @@ pub async fn archive_photo(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     let photo = p.set_photo_archived(&id, true).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(photo.effective()))
 }
 
@@ -1050,10 +1051,10 @@ pub async fn unarchive_photo(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     let photo = p.set_photo_archived(&id, false).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(photo.effective()))
 }
 
@@ -1062,7 +1063,7 @@ pub async fn permanent_delete_photo(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     if st.photos.remove(&id).is_none() {
         return Err(StatusCode::NOT_FOUND);
@@ -1137,7 +1138,7 @@ pub async fn list_albums(
     // The groups the caller belongs to (for group-targeted shares).
     let my_groups: std::collections::HashSet<String> = groups
         .iter()
-        .filter(|g| g.member_ids.iter().any(|m| *m == actor.0))
+        .filter(|g| g.member_ids.contains(&actor.0))
         .map(|g| g.id.clone())
         .collect();
     let shared_to_me = |a: &Album| {
@@ -1163,12 +1164,12 @@ pub async fn create_album(
     if body.owner_id != actor.0 {
         return Err(StatusCode::FORBIDDEN);
     }
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first: validate + mint id + insert (one INSERT = one tx).
-    if p.get_user(&body.owner_id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+    if p.get_user(&body.owner_id).await.or_500()?.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    let id = p.next_id("alb").await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let id = p.next_id("alb").await.or_500()?;
     let cover_seed = match body.photo_ids.first() {
         Some(pid) => p.get_photo(pid).await.ok().flatten().map(|ph| ph.seed).unwrap_or(0),
         None => 0,
@@ -1181,7 +1182,7 @@ pub async fn create_album(
         photo_ids: body.photo_ids,
         shares: Vec::new(),
     };
-    p.upsert_album(&album).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.upsert_album(&album).await.or_500()?;
     Ok((StatusCode::CREATED, Json(album)))
 }
 
@@ -1189,20 +1190,20 @@ pub async fn get_album(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<Album>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let album = p.get_album(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    album.map(Json).ok_or(StatusCode::NOT_FOUND)
+    let p = st.read().await.persistence.clone().or_500()?;
+    let album = p.get_album(&id).await.or_500()?;
+    album.map(Json).or_404()
 }
 
 pub async fn delete_album(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    if p.get_album(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+    let p = st.read().await.persistence.clone().or_500()?;
+    if p.get_album(&id).await.or_500()?.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
-    p.delete_album(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.delete_album(&id).await.or_500()?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1211,7 +1212,7 @@ pub async fn add_album_photos(
     Path(id): Path<String>,
     Json(body): Json<AddPhotos>,
 ) -> Result<Json<Album>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first, ONE transaction: validate photos, lock the album, append
     // the new (distinct) photo ids, write back.
     for pid in &body.photo_ids {
@@ -1219,14 +1220,14 @@ pub async fn add_album_photos(
             return Err(StatusCode::NOT_FOUND);
         }
     }
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT photo_ids FROM albums WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut photo_ids: Vec<String> =
         serde_json::from_value(row.get("photo_ids")).unwrap_or_default();
     for pid in body.photo_ids {
@@ -1239,11 +1240,11 @@ pub async fn add_album_photos(
         .bind(serde_json::to_value(&photo_ids).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let album = p.get_album(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(album))
 }
 
@@ -1252,17 +1253,17 @@ pub async fn add_album_share(
     Path(id): Path<String>,
     Json(body): Json<ShareBody>,
 ) -> Result<Json<Album>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first: update the album's shares in one transaction, then notify.
     let target = body.target.clone();
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT shares FROM albums WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut shares: Vec<Share> = serde_json::from_value(row.get("shares")).unwrap_or_default();
     if let Some(existing) = shares.iter_mut().find(|s| s.target == target) {
         existing.role = body.role;
@@ -1274,11 +1275,11 @@ pub async fn add_album_share(
         .bind(serde_json::to_value(&shares).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let album = p.get_album(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     // Recipients (target user, or every group member) resolved from a DB snapshot.
     let recipients = match request_snapshot(&st).await {
         Some(s) => s.target_emails(&target),
@@ -1296,15 +1297,15 @@ pub async fn remove_album_share(
     Path(id): Path<String>,
     Json(body): Json<ShareBody>,
 ) -> Result<Json<Album>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT shares FROM albums WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut shares: Vec<Share> = serde_json::from_value(row.get("shares")).unwrap_or_default();
     shares.retain(|s| s.target != body.target);
     sqlx::query("UPDATE albums SET shares = $2 WHERE id = $1")
@@ -1312,11 +1313,11 @@ pub async fn remove_album_share(
         .bind(serde_json::to_value(&shares).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let album = p.get_album(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     Ok(Json(album))
 }
 
@@ -1334,9 +1335,9 @@ pub async fn contribute_to_album(
     // (which would let one user contribute "as" another).
     let user_id = actor.0.clone();
 
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Authz + validation against a DB snapshot, append in one transaction.
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     if !snap.albums.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -1350,14 +1351,14 @@ pub async fn contribute_to_album(
             Some(_) => {}
         }
     }
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     use sqlx::Row as _;
     let row = sqlx::query("SELECT photo_ids FROM albums WHERE id = $1 FOR UPDATE")
         .bind(&id)
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let mut photo_ids: Vec<String> =
         serde_json::from_value(row.get("photo_ids")).unwrap_or_default();
     let mut added = 0usize;
@@ -1372,11 +1373,11 @@ pub async fn contribute_to_album(
         .bind(serde_json::to_value(&photo_ids).unwrap_or_default())
         .execute(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
+    tx.commit().await.or_500()?;
     let album = p.get_album(&id).await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     if added > 0 {
         let actor_name = snap.users.get(&user_id).map(|u| u.name.clone()).unwrap_or_else(|| user_id.clone());
         let mut recipients: Vec<String> = Vec::new();
@@ -1422,13 +1423,13 @@ pub async fn create_public_link(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<PublicLinkResponse>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     let features = p.load_storage().await.ok().flatten().unwrap_or_default().features;
     if !features.public_links {
         return Err(StatusCode::FORBIDDEN);
     }
     // The album must exist (resource_authz already proved the caller owns it).
-    if p.get_album(&id).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?.is_none() {
+    if p.get_album(&id).await.or_500()?.is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
     // Unpredictable token from the OS CSPRNG (same primitive as session/reset
@@ -1436,7 +1437,7 @@ pub async fn create_public_link(
     let token = crate::state::random_hex(32);
     p.upsert_public_link(&token, &id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
     let url = format!("/api/public/albums/{token}");
     Ok(Json(PublicLinkResponse { token, url }))
 }
@@ -1447,10 +1448,10 @@ pub async fn revoke_public_link(
     State(st): State<Shared>,
     Path((_id, token)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     p.delete_public_link(&token)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1465,8 +1466,8 @@ async fn resolve_public_album(p: &crate::db::Persistence, token: &str) -> Result
     }
     p.get_public_link(token)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)
+        .or_500()?
+        .or_404()
 }
 
 /// GET /api/public/albums/{token} — PUBLIC (no auth). Returns the album metadata
@@ -1476,17 +1477,17 @@ pub async fn public_album(
     State(st): State<Shared>,
     Path(token): Path<String>,
 ) -> Result<Json<PublicAlbumView>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     let album_id = resolve_public_album(&p, &token).await?;
     let album = p
         .get_album(&album_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     // Fetch each member photo, keeping only LIVE ones (not trashed, not archived).
     let mut photos: Vec<PhotoView> = Vec::new();
     for pid in &album.photo_ids {
-        if let Some(photo) = p.get_photo(pid).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)? {
+        if let Some(photo) = p.get_photo(pid).await.or_500()? {
             if photo.deleted_at.is_none() && !photo.archived {
                 photos.push(photo.effective());
             }
@@ -1507,16 +1508,16 @@ async fn public_album_photo(
     let album = p
         .get_album(&album_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     if !album.photo_ids.iter().any(|pid| pid == photo_id) {
         return Err(StatusCode::NOT_FOUND);
     }
     let photo = p
         .get_photo(photo_id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     if photo.deleted_at.is_some() || photo.archived {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -1530,7 +1531,7 @@ pub async fn public_album_thumb(
     State(st): State<Shared>,
     Path((token, id)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Membership + liveness check before serving any bytes.
     public_album_photo(&p, &token, &id).await?;
     let st = st.read().await;
@@ -1549,7 +1550,7 @@ pub async fn public_album_render(
     Path((token, id)): Path<(String, String)>,
     Query(q): Query<RenderQuery>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     let photo = public_album_photo(&p, &token, &id).await?;
     // Public links are read-only IMAGE viewing; videos aren't publicly served.
     let src_ext = photo.filename.rsplit('.').next().unwrap_or("");
@@ -1559,14 +1560,8 @@ pub async fn public_album_render(
         return Err(StatusCode::NOT_FOUND);
     }
     let (bytes, ct) = {
-        let cfg = {
-            let g = st.read().await;
-            let mut a = AppState::default();
-            a.data_dir = g.data_dir.clone();
-            a.storage = g.storage.clone();
-            a
-        };
-        cfg.load_original_blob(&photo).await.ok_or(StatusCode::NOT_FOUND)?
+        let cfg = st.read().await.storage_ctx();
+        cfg.load_original_blob(&photo).await.or_404()?
     };
     let source = MediaFormat::from_mime(&ct);
     let target = match q.fmt {
@@ -1656,7 +1651,7 @@ pub async fn search_photos(
     Path(id): Path<String>,
     axum::extract::Query(query): axum::extract::Query<SearchQuery>,
 ) -> Result<Json<Vec<PhotoView>>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -1711,7 +1706,7 @@ pub async fn get_duplicates(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<DuplicatesView>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -1731,7 +1726,7 @@ pub async fn list_people(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<crate::models::PersonView>>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -1748,8 +1743,8 @@ pub async fn name_person(
     Json(body): Json<crate::models::NamePersonBody>,
 ) -> Result<StatusCode, StatusCode> {
     // Postgres-first: rename in a DB snapshot, write faces + affected photos back.
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let owner = snap.name_person(&person_id, &body.name).ok_or(StatusCode::NOT_FOUND)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
+    let owner = snap.name_person(&person_id, &body.name).or_404()?;
     snap.persist_faces(&owner).await;
     let photo_ids: Vec<String> = snap
         .photos
@@ -1772,8 +1767,8 @@ pub async fn add_relationship(
     Path(person_id): Path<String>,
     Json(body): Json<crate::models::RelationshipBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let _p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _p = st.read().await.persistence.clone().or_500()?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     // Distinguish "unknown person" (404) from "invalid link" (400).
     if !snap.people.contains_key(&person_id) || !snap.people.contains_key(&body.other_person_id) {
         return Err(StatusCode::NOT_FOUND);
@@ -1791,11 +1786,11 @@ pub async fn remove_relationship(
     State(st): State<Shared>,
     Path((person_id, other_person_id)): Path<(String, String)>,
 ) -> Result<StatusCode, StatusCode> {
-    let _p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _p = st.read().await.persistence.clone().or_500()?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let owner = snap
         .unlink_people(&person_id, &other_person_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_404()?;
     snap.persist_faces(&owner).await;
     Ok(StatusCode::OK)
 }
@@ -1808,20 +1803,20 @@ pub async fn person_photos(
     Path(person_id): Path<String>,
     Query(q): Query<PersonPhotosQuery>,
 ) -> Result<Json<Vec<PhotoView>>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     // The owner scope is the person's owner; an optional `?owner=` must match it.
     let person_owner = st
         .people
         .get(&person_id)
         .map(|p| p.owner_id.clone())
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_404()?;
     if let Some(req) = q.owner.filter(|s| !s.is_empty()) {
         if req != person_owner {
             return Err(StatusCode::FORBIDDEN);
         }
     }
-    let photos = st.person_photos(&person_owner, &person_id).ok_or(StatusCode::NOT_FOUND)?;
+    let photos = st.person_photos(&person_owner, &person_id).or_404()?;
     Ok(Json(photos))
 }
 
@@ -1844,8 +1839,8 @@ pub async fn person_faces(
     State(st): State<Shared>,
     Path(person_id): Path<String>,
 ) -> Result<Json<crate::models::PersonFacesResponse>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    snap.person_faces(&person_id).map(Json).ok_or(StatusCode::NOT_FOUND)
+    let snap = request_snapshot(&st).await.or_500()?;
+    snap.person_faces(&person_id).map(Json).or_404()
 }
 
 /// POST /api/people/{person_id}/birthdate — set/clear the date of birth.
@@ -1854,8 +1849,8 @@ pub async fn set_person_birthdate(
     Path(person_id): Path<String>,
     Json(body): Json<crate::models::BirthdateBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let owner = snap.set_person_birthdate(&person_id, body.birthdate).ok_or(StatusCode::NOT_FOUND)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
+    let owner = snap.set_person_birthdate(&person_id, body.birthdate).or_404()?;
     snap.persist_faces(&owner).await;
     Ok(StatusCode::OK)
 }
@@ -1866,8 +1861,8 @@ pub async fn set_person_cover(
     Path(person_id): Path<String>,
     Json(body): Json<crate::models::CoverBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let owner = snap.set_person_cover(&person_id, &body.face_id).ok_or(StatusCode::NOT_FOUND)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
+    let owner = snap.set_person_cover(&person_id, &body.face_id).or_404()?;
     snap.persist_faces(&owner).await;
     Ok(StatusCode::OK)
 }
@@ -1879,8 +1874,8 @@ pub async fn approve_faces(
     Path(person_id): Path<String>,
     Json(body): Json<crate::models::FaceIdsBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let owner = snap.approve_faces(&person_id, &body.face_ids).ok_or(StatusCode::NOT_FOUND)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
+    let owner = snap.approve_faces(&person_id, &body.face_ids).or_404()?;
     snap.persist_faces(&owner).await;
     Ok(StatusCode::OK)
 }
@@ -1891,8 +1886,8 @@ pub async fn ignore_faces(
     Path(person_id): Path<String>,
     Json(body): Json<crate::models::FaceIdsBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let owner = snap.ignore_faces(&person_id, &body.face_ids).ok_or(StatusCode::NOT_FOUND)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
+    let owner = snap.ignore_faces(&person_id, &body.face_ids).or_404()?;
     snap.persist_faces(&owner).await;
     Ok(StatusCode::OK)
 }
@@ -1903,7 +1898,7 @@ pub async fn move_faces(
     Path(person_id): Path<String>,
     Json(body): Json<crate::models::MoveFacesBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let owner = snap
         .move_faces(&person_id, &body.face_ids, &body.to_person_id)
         .ok_or(StatusCode::BAD_REQUEST)?;
@@ -1917,7 +1912,7 @@ pub async fn merge_people(
     Path(person_id): Path<String>,
     Json(body): Json<crate::models::MergeBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let owner = snap.merge_people(&person_id, &body.into_person_id).ok_or(StatusCode::BAD_REQUEST)?;
     snap.persist_faces(&owner).await;
     Ok(StatusCode::OK)
@@ -1928,8 +1923,8 @@ pub async fn hide_person(
     State(st): State<Shared>,
     Path(person_id): Path<String>,
 ) -> Result<StatusCode, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let owner = snap.hide_person(&person_id).ok_or(StatusCode::NOT_FOUND)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
+    let owner = snap.hide_person(&person_id).or_404()?;
     snap.persist_faces(&owner).await;
     Ok(StatusCode::OK)
 }
@@ -1946,7 +1941,7 @@ pub async fn get_user_storage(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<UserStorageView>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -1963,7 +1958,7 @@ pub async fn get_vault(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<VaultStatus>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -1982,8 +1977,8 @@ pub async fn set_vault_pin(
     Path(id): Path<String>,
     Json(body): Json<SetPinBody>,
 ) -> Result<StatusCode, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     if !snap.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -1996,7 +1991,7 @@ pub async fn set_vault_pin(
     }
     snap.set_pin(&id, &body.pin);
     let vault = snap.vaults.get(&id).cloned().unwrap_or_default();
-    p.upsert_vault(&id, &vault).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.upsert_vault(&id, &vault).await.or_500()?;
     Ok(StatusCode::OK)
 }
 
@@ -2007,8 +2002,8 @@ pub async fn unlock_vault(
     Path(id): Path<String>,
     Json(body): Json<UnlockBody>,
 ) -> Result<Json<VaultContents>, StatusCode> {
-    let _p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let _p = st.read().await.persistence.clone().or_500()?;
+    let snap = request_snapshot(&st).await.or_500()?;
     if !snap.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -2035,8 +2030,8 @@ pub async fn add_vault_photos(
     Path(id): Path<String>,
     Json(body): Json<VaultPhotosBody>,
 ) -> Result<Json<VaultCount>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let snap = request_snapshot(&st).await.or_500()?;
     if !snap.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -2057,7 +2052,7 @@ pub async fn add_vault_photos(
         }
     }
     let count = vault.photo_ids.len();
-    p.upsert_vault(&id, &vault).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.upsert_vault(&id, &vault).await.or_500()?;
     Ok(Json(VaultCount { count }))
 }
 
@@ -2068,8 +2063,8 @@ pub async fn remove_vault_photos(
     Path(id): Path<String>,
     Json(body): Json<VaultPhotosBody>,
 ) -> Result<Json<VaultCount>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
+    let snap = request_snapshot(&st).await.or_500()?;
     if !snap.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -2079,7 +2074,7 @@ pub async fn remove_vault_photos(
     let mut vault = snap.vaults.get(&id).cloned().unwrap_or_default();
     vault.photo_ids.retain(|pid| !body.photo_ids.contains(pid));
     let count = vault.photo_ids.len();
-    p.upsert_vault(&id, &vault).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    p.upsert_vault(&id, &vault).await.or_500()?;
     Ok(Json(VaultCount { count }))
 }
 
@@ -2090,7 +2085,7 @@ pub async fn get_prefs(
     Path(id): Path<String>,
 ) -> Result<Json<TimelinePrefs>, StatusCode> {
     // Postgres-first: read prefs from a fresh DB snapshot.
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -2105,7 +2100,7 @@ pub async fn update_prefs(
     Json(body): Json<UpdatePrefs>,
 ) -> Result<Json<TimelinePrefs>, StatusCode> {
     // Postgres-first: mutate prefs on a DB snapshot; persist_prefs writes back.
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -2129,7 +2124,7 @@ pub async fn get_timeline(
     Path(id): Path<String>,
 ) -> Result<Json<Timeline>, StatusCode> {
     // Postgres-first: run the timeline logic against a fresh DB snapshot.
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let st: &AppState = &snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -2185,7 +2180,7 @@ pub async fn update_storage(
         Some(s) => s,
         None => {
             guard = st.write().await;
-            &mut *guard
+            &mut guard
         }
     };
 
@@ -2259,14 +2254,14 @@ pub async fn patch_settings(
     State(st): State<Shared>,
     Json(ops): Json<json_patch::Patch>,
 ) -> Result<Json<AppSettingsView>, StatusCode> {
-    let p = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first, ONE transaction over the settings singleton row.
     use sqlx::Row as _;
-    let mut tx = p.begin().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut tx = p.begin().await.or_500()?;
     let row = sqlx::query("SELECT settings FROM storage_settings WHERE id = 1 FOR UPDATE")
         .fetch_optional(&mut *tx)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
     let mut settings: StorageSettings = row
         .map(|r| serde_json::from_value(r.get("settings")).unwrap_or_default())
         .unwrap_or_default();
@@ -2279,8 +2274,8 @@ pub async fn patch_settings(
     .bind(serde_json::to_value(&settings).unwrap_or_default())
     .execute(&mut *tx)
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tx.commit().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .or_500()?;
+    tx.commit().await.or_500()?;
     Ok(Json(AppSettingsView::of(&settings)))
 }
 
@@ -2304,7 +2299,7 @@ pub struct BackupRunResult {
 pub async fn run_backup_now(
     State(st): State<Shared>,
 ) -> Result<Json<BackupRunResult>, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     let count = st.run_backup().await.map_err(|e| {
         tracing::warn!("manual backup run failed: {e}");
@@ -2379,17 +2374,17 @@ pub async fn render_plan(
     Query(q): Query<RenderQuery>,
     headers: HeaderMap,
 ) -> Result<Json<RenderPlan>, StatusCode> {
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let pool = st.read().await.persistence.clone().or_500()?;
     let photo = pool
         .get_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let photo = &photo;
 
     // Source format: prefer the filename extension, else map from `kind`.
     let ext = photo.filename.rsplit('.').next().unwrap_or("");
-    let source = MediaFormat::from_ext(ext).unwrap_or_else(|| match photo.kind.as_str() {
+    let source = MediaFormat::from_ext(ext).unwrap_or(match photo.kind.as_str() {
         "video" => MediaFormat::Mp4,
         _ => MediaFormat::Jpeg,
     });
@@ -2464,19 +2459,15 @@ pub async fn get_original(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (pool, cfg) = {
+        let g = st.read().await;
+        (g.persistence.clone().or_500()?, g.storage_ctx())
+    };
     let photo = pool
         .get_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let cfg = {
-        let g = st.read().await;
-        let mut a = AppState::default();
-        a.data_dir = g.data_dir.clone();
-        a.storage = g.storage.clone();
-        a
-    };
+        .or_500()?
+        .or_404()?;
     match cfg.load_original_blob(&photo).await {
         Some((bytes, ct)) => Ok(([(header::CONTENT_TYPE, ct)], bytes)),
         None => Err(StatusCode::NOT_FOUND),
@@ -2494,23 +2485,19 @@ pub async fn download_companion(
     State(st): State<Shared>,
     Path((id, ext)): Path<(String, String)>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (pool, cfg) = {
+        let g = st.read().await;
+        (g.persistence.clone().or_500()?, g.storage_ctx())
+    };
     let photo = pool
         .get_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let cfg = {
-        let g = st.read().await;
-        let mut a = AppState::default();
-        a.data_dir = g.data_dir.clone();
-        a.storage = g.storage.clone();
-        a
-    };
+        .or_500()?
+        .or_404()?;
     let (bytes, filename, mime) = cfg
         .load_companion_blob(&photo, &ext)
         .await
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_404()?;
     let disposition = format!("attachment; filename=\"{filename}\"");
     Ok((
         [
@@ -2561,17 +2548,17 @@ pub async fn photo_faces(
     Extension(actor): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<PhotoFacesResponse>, StatusCode> {
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let pool = st.read().await.persistence.clone().or_500()?;
     let photo = pool
         .get_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
     let is_owner = photo.owner_id == actor.0;
     let faces = pool
         .faces_for_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .or_500()?;
 
     // Resolve cluster names for the owner only (small distinct set of person ids).
     let mut names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2630,28 +2617,24 @@ pub async fn render_photo(
     // Fetch the single photo row, then load its original bytes + content type,
     // then release the lock before doing the (CPU-bound) decode/resize/encode.
     let (bytes, ct, is_video, features) = {
-        let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let (pool, cfg) = {
+            let g = st.read().await;
+            (g.persistence.clone().or_500()?, g.storage_ctx())
+        };
         let photo = pool
             .get_photo(&id)
             .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-            .ok_or(StatusCode::NOT_FOUND)?;
+            .or_500()?
+            .or_404()?;
         // A photo is a VIDEO when its `kind` says so OR its source format is a
         // video container (filename/mime). Image rendering is unaffected below.
         let src_ext = photo.filename.rsplit('.').next().unwrap_or("");
         let is_video = photo.kind == "video"
             || MediaFormat::from_ext(src_ext).map(|f| f.is_video()).unwrap_or(false);
         let features = pool.load_storage().await.ok().flatten().unwrap_or_default().features;
-        let cfg = {
-            let g = st.read().await;
-            let mut a = AppState::default();
-            a.data_dir = g.data_dir.clone();
-            a.storage = g.storage.clone();
-            a
-        };
         // Prefer the plugin-EDITED version when one exists (the original stays
         // available via GET /original); fall back to the original otherwise.
-        let (bytes, ct) = cfg.load_display_blob(&photo).await.ok_or(StatusCode::NOT_FOUND)?;
+        let (bytes, ct) = cfg.load_display_blob(&photo).await.or_404()?;
         (bytes, ct, is_video, features)
     };
 
@@ -2809,7 +2792,7 @@ pub async fn update_smtp(
         Some(s) => s,
         None => {
             guard = st.write().await;
-            &mut *guard
+            &mut guard
         }
     };
     let mut password = body.password;
@@ -2843,7 +2826,7 @@ pub async fn create_invite(
     Json(body): Json<CreateInvite>,
 ) -> Result<(StatusCode, Json<Invite>), StatusCode> {
     let (invite, mailer) = {
-        let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        let mut snap = request_snapshot(&st).await.or_500()?;
         let st: &mut AppState = &mut snap;
         if !st.users.contains_key(&body.inviter_id) {
             return Err(StatusCode::NOT_FOUND);
@@ -2891,10 +2874,10 @@ pub async fn accept_invite(
     State(st): State<Shared>,
     Json(body): Json<AcceptInvite>,
 ) -> Result<Json<User>, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     let email = {
-        let invite = st.invites.get(&body.token).ok_or(StatusCode::NOT_FOUND)?;
+        let invite = st.invites.get(&body.token).or_404()?;
         // Reject replay: an already-accepted invite can't be reused.
         if invite.accepted {
             return Err(StatusCode::CONFLICT);
@@ -3101,7 +3084,7 @@ pub async fn plugin_proxy(
     use photon_plugin_proto::pb;
 
     let host = st.read().await.plugins.clone();
-    let host = host.ok_or(StatusCode::NOT_FOUND)?;
+    let host = host.or_404()?;
     if !host.has_route(&name).await {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -3199,23 +3182,22 @@ pub async fn apply_plugin_edit(
     Query(q): Query<PluginEditQuery>,
     params: Option<Json<std::collections::HashMap<String, String>>>,
 ) -> Result<impl IntoResponse, StatusCode> {
-    let host = st.read().await.plugins.clone().ok_or(StatusCode::NOT_FOUND)?;
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cfg = {
+    let (host, pool, cfg) = {
         let g = st.read().await;
-        let mut a = AppState::default();
-        a.data_dir = g.data_dir.clone();
-        a.storage = g.storage.clone();
-        a
+        (
+            g.plugins.clone().or_404()?,
+            g.persistence.clone().or_500()?,
+            g.storage_ctx(),
+        )
     };
 
     // Always edit from the ORIGINAL (non-destructive; re-edit cleanly overwrites).
     let photo = pool
         .get_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let (bytes, ct) = cfg.load_original_blob(&photo).await.ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
+    let (bytes, ct) = cfg.load_original_blob(&photo).await.or_404()?;
 
     let params = params.map(|Json(p)| p).unwrap_or_default();
     let (out, out_ct) = host
@@ -3228,8 +3210,8 @@ pub async fn apply_plugin_edit(
         let edited = cfg
             .store_edited_version(photo, &out)
             .await
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        pool.upsert_photo(&edited).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            .or_500()?;
+        pool.upsert_photo(&edited).await.or_500()?;
     }
 
     Ok(([(header::CONTENT_TYPE, out_ct)], out))
@@ -3247,7 +3229,7 @@ pub struct RotateBody {
 /// Apply a 90°-step rotation (+ optional H-flip) to raw image bytes, returning PNG.
 fn rotate_image_bytes(bytes: &[u8], degrees: i32, flip: bool) -> Option<Vec<u8>> {
     let img = image::load_from_memory(bytes).ok()?;
-    let mut img = match ((degrees % 360) + 360) % 360 {
+    let mut img = match degrees.rem_euclid(360) {
         90 => img.rotate90(),
         180 => img.rotate180(),
         270 => img.rotate270(),
@@ -3270,36 +3252,33 @@ pub async fn rotate_photo(
     Path(id): Path<String>,
     Json(body): Json<RotateBody>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cfg = {
+    let (pool, cfg) = {
         let g = st.read().await;
-        let mut a = AppState::default();
-        a.data_dir = g.data_dir.clone();
-        a.storage = g.storage.clone();
-        a
+        (g.persistence.clone().or_500()?, g.storage_ctx())
     };
     let photo = pool
         .get_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
-    let (bytes, _ct) = cfg.load_original_blob(&photo).await.ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
 
-    // No-op geometry → drop any edit and revert to the original.
-    let net = ((body.degrees % 360) + 360) % 360;
+    // No-op geometry → drop any edit and revert to the original. Checked BEFORE
+    // loading the original bytes (mirrors `adjust_photo`).
+    let net = body.degrees.rem_euclid(360);
     if net == 0 && !body.flip {
-        let reverted = cfg.clear_edited_version(photo).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        pool.upsert_photo(&reverted).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let reverted = cfg.clear_edited_version(photo).await.or_500()?;
+        pool.upsert_photo(&reverted).await.or_500()?;
         return Ok(Json(reverted.effective()));
     }
 
+    let (bytes, _ct) = cfg.load_original_blob(&photo).await.or_404()?;
     let out = tokio::task::spawn_blocking(move || rotate_image_bytes(&bytes, net, body.flip))
         .await
         .ok()
         .flatten()
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let edited = cfg.store_edited_version(photo, &out).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    pool.upsert_photo(&edited).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let edited = cfg.store_edited_version(photo, &out).await.or_500()?;
+    pool.upsert_photo(&edited).await.or_500()?;
     Ok(Json(edited.effective()))
 }
 
@@ -3423,35 +3402,31 @@ pub async fn adjust_photo(
     Path(id): Path<String>,
     Json(body): Json<AdjustBody>,
 ) -> Result<Json<PhotoView>, StatusCode> {
-    let pool = st.read().await.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let cfg = {
+    let (pool, cfg) = {
         let g = st.read().await;
-        let mut a = AppState::default();
-        a.data_dir = g.data_dir.clone();
-        a.storage = g.storage.clone();
-        a
+        (g.persistence.clone().or_500()?, g.storage_ctx())
     };
     let photo = pool
         .get_photo(&id)
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_500()?
+        .or_404()?;
 
     // No-op adjustments → drop any edit and revert to the original.
     if body.all_zero() {
-        let reverted = cfg.clear_edited_version(photo).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        pool.upsert_photo(&reverted).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let reverted = cfg.clear_edited_version(photo).await.or_500()?;
+        pool.upsert_photo(&reverted).await.or_500()?;
         return Ok(Json(reverted.effective()));
     }
 
-    let (bytes, _ct) = cfg.load_original_blob(&photo).await.ok_or(StatusCode::NOT_FOUND)?;
+    let (bytes, _ct) = cfg.load_original_blob(&photo).await.or_404()?;
     let out = tokio::task::spawn_blocking(move || adjust_image_bytes(&bytes, &body))
         .await
         .ok()
         .flatten()
         .ok_or(StatusCode::UNPROCESSABLE_ENTITY)?;
-    let edited = cfg.store_edited_version(photo, &out).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    pool.upsert_photo(&edited).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let edited = cfg.store_edited_version(photo, &out).await.or_500()?;
+    pool.upsert_photo(&edited).await.or_500()?;
     Ok(Json(edited.effective()))
 }
 
@@ -3468,7 +3443,7 @@ pub async fn admin_stats(State(st): State<Shared>) -> Json<AdminStats> {
         Some(s) => s,
         None => {
             guard = st.read().await;
-            &*guard
+            &guard
         }
     };
 
@@ -3548,7 +3523,7 @@ pub async fn audit_access(State(st): State<Shared>) -> Json<AuditResult> {
         Some(s) => s,
         None => {
             guard = st.read().await;
-            &*guard
+            &guard
         }
     };
     let violations = st.audit_access();
@@ -3602,7 +3577,7 @@ pub async fn login(
             Some(s) => s,
             None => {
                 guard = st.read().await;
-                &*guard
+                &guard
             }
         };
         let secret = lookup.password_secret().to_vec();
@@ -3675,20 +3650,28 @@ pub async fn login(
         consumed_step = Some(step);
     }
 
-    // Mint + persist the session (and reset rate-limit) on the live state.
-    let mut st = st.write().await;
-    st.rate_reset(&key);
-    // Record the consumed TOTP step so it (and earlier ones) can't be replayed.
-    if let Some(s) = consumed_step {
-        if let Some(p) = st.persistence.clone() {
+    // Mint the session + reset rate-limit under a brief write lock, then clone the
+    // pool handle and DROP the guard BEFORE any DB await — never hold the global
+    // write lock across persistence (mirrors `cast_dlna` / the login path).
+    let (token, user_out, pool) = {
+        let mut st = st.write().await;
+        st.rate_reset(&key);
+        let token = st.create_session(&user.id);
+        let user_out = st.public_user(&user);
+        let pool = st.persistence.clone();
+        (token, user_out, pool)
+    };
+    if let Some(p) = &pool {
+        // Record the consumed TOTP step so it (and earlier ones) can't be replayed.
+        if let Some(s) = consumed_step {
             let _ = p.set_totp_last_step(&user.id, s).await;
         }
+        // Write the session through to Postgres so other instances honor it.
+        if let Err(e) = p.upsert_session(&token, &user.id, &now_rfc3339()).await {
+            tracing::warn!("persist_session failed: {e}");
+        }
     }
-    let token = st.create_session(&user.id);
-    // Write the session through to Postgres so other instances honor it.
-    st.persist_session(&token).await;
-    let user = st.public_user(&user);
-    Json(LoginResponse { token, user }).into_response()
+    Json(LoginResponse { token, user: user_out }).into_response()
 }
 
 /// GET /api/me — return the user for the bearer token in the `Authorization`
@@ -3705,7 +3688,7 @@ pub async fn me(
         Some(s) => s,
         None => {
             guard = st.read().await;
-            &*guard
+            &guard
         }
     };
     let uid = st.resolve_session(&token).await.ok_or(StatusCode::UNAUTHORIZED)?;
@@ -3719,10 +3702,20 @@ pub async fn logout(
     headers: HeaderMap,
 ) -> Json<serde_json::Value> {
     if let Some(token) = bearer_token(&headers) {
-        let mut st = st.write().await;
-        st.end_session(&token);
+        // Drop the session under a brief write lock, clone the pool handle, then
+        // DROP the guard BEFORE awaiting the shared-store delete (never hold the
+        // global write lock across persistence).
+        let pool = {
+            let mut st = st.write().await;
+            st.end_session(&token);
+            st.persistence.clone()
+        };
         // Invalidate it in the shared store too, not just this instance's cache.
-        st.delete_session_persisted(&token).await;
+        if let Some(p) = &pool {
+            if let Err(e) = p.delete_session(&token).await {
+                tracing::warn!("delete_session failed: {e}");
+            }
+        }
     }
     Json(serde_json::json!({ "ok": true }))
 }
@@ -3800,14 +3793,14 @@ pub async fn totp_setup(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<TotpSetupResponse>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    let email = snap.users.get(&id).map(|u| u.email.clone()).ok_or(StatusCode::NOT_FOUND)?;
+    let snap = request_snapshot(&st).await.or_500()?;
+    let email = snap.users.get(&id).map(|u| u.email.clone()).or_404()?;
     // Fresh 160-bit secret (RFC-4226 recommended length) from the OS CSPRNG,
     // base32-encoded for QR/manual entry into authenticator apps.
     let mut raw = [0u8; 20];
     getrandom::getrandom(&mut raw).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let secret = totp_rs::Secret::Raw(raw.to_vec()).to_encoded().to_string();
-    let totp = build_totp(&secret, &email).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let totp = build_totp(&secret, &email).or_500()?;
     let otpauth_uri = totp.get_url();
     Ok(Json(TotpSetupResponse { secret, otpauth_uri }))
 }
@@ -3821,9 +3814,9 @@ pub async fn totp_verify(
     Path(id): Path<String>,
     Json(body): Json<TotpVerifyBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
-    let email = st.users.get(&id).map(|u| u.email.clone()).ok_or(StatusCode::NOT_FOUND)?;
+    let email = st.users.get(&id).map(|u| u.email.clone()).or_404()?;
     let totp = build_totp(&body.secret, &email).ok_or(StatusCode::UNAUTHORIZED)?;
     // `check_current` only errors if the system clock is before the UNIX epoch.
     let ok = totp.check_current(&body.code).unwrap_or(false);
@@ -3843,7 +3836,7 @@ pub async fn totp_disable(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let mut snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut snap = request_snapshot(&st).await.or_500()?;
     let st: &mut AppState = &mut snap;
     if !st.users.contains_key(&id) {
         return Err(StatusCode::NOT_FOUND);
@@ -3861,12 +3854,12 @@ pub async fn totp_status(
     State(st): State<Shared>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let snap = request_snapshot(&st).await.ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    let snap = request_snapshot(&st).await.or_500()?;
     let enabled = snap
         .users
         .get(&id)
         .map(|u| u.totp_secret.is_some())
-        .ok_or(StatusCode::NOT_FOUND)?;
+        .or_404()?;
     Ok(Json(serde_json::json!({ "enabled": enabled })))
 }
 
@@ -3943,7 +3936,7 @@ pub async fn cast_dlna(
             .dlna_devices
             .get(&body.device_id)
             .cloned()
-            .ok_or(StatusCode::NOT_FOUND)?
+            .or_404()?
     };
     crate::dlna::cast(&device, &body.url, &body.title)
         .await
@@ -5823,15 +5816,10 @@ mod tests {
 
     // ---- Targeted per-resource authorization (auth::authorize) ----
 
-    /// Build a minimal config-only `AppState` from a `Shared`, matching what
+    /// Build the minimal [`StorageCtx`] from a `Shared`, matching what
     /// `auth_middleware` clones out before issuing its targeted authz queries.
-    async fn authz_config(st: &Shared) -> AppState {
-        let guard = st.read().await;
-        let mut cfg = AppState::default();
-        cfg.data_dir = guard.data_dir.clone();
-        cfg.storage = guard.storage.clone();
-        cfg.password_secret = guard.password_secret.clone();
-        cfg
+    async fn authz_config(st: &Shared) -> crate::state::StorageCtx {
+        st.read().await.storage_ctx()
     }
 
     /// The targeted `auth::authorize` helper (the core of `auth_middleware`) must

@@ -568,7 +568,7 @@ pub fn tools() -> Vec<Tool> {
             handler: |st, actor, _a| boxed(async move {
                 let st = st.read().await;
                 let mut g: Vec<_> = st.groups.values()
-                    .filter(|g| g.owner_id == actor.user_id || g.member_ids.iter().any(|m| *m == actor.user_id))
+                    .filter(|g| g.owner_id == actor.user_id || g.member_ids.contains(&actor.user_id))
                     .cloned().collect();
                 g.sort_by(|a, b| a.id.cmp(&b.id));
                 to_value(&g)

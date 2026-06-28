@@ -34,7 +34,7 @@ impl std::fmt::Debug for AppExt {
 /// Pull the shared app state out of the worker context (registered via
 /// `add_extension`). Robust whether `get_ext` yields an `Arc<AppExt>` or `&AppExt`.
 fn shared(ctx: &WorkerContext) -> Shared {
-    (*ctx.get_ext::<AppExt>().expect("AppExt extension registered")).0.clone()
+    ctx.get_ext::<AppExt>().expect("AppExt extension registered").0.clone()
 }
 
 // ---- Job bodies (shared by the durable task handlers AND the inline intervals) ----
@@ -448,9 +448,9 @@ fn schedule_to_crontab(secs: u32) -> String {
     let mins = (secs / 60).max(1);
     if mins <= 59 {
         format!("*/{mins} * * * *")
-    } else if mins % 60 == 0 && (mins / 60) <= 23 {
+    } else if mins.is_multiple_of(60) && (mins / 60) <= 23 {
         format!("0 */{} * * *", mins / 60)
-    } else if mins % (60 * 24) == 0 {
+    } else if mins.is_multiple_of(60 * 24) {
         "0 0 * * *".to_string() // daily
     } else {
         "0 * * * *".to_string() // coarsen to hourly
@@ -468,6 +468,11 @@ type DynErr = Box<dyn std::error::Error + Send + Sync>;
 /// how many instances are up.
 pub async fn start_worker(state: Shared, database_url: &str) -> Result<WorkerUtils, DynErr> {
     // Scheduled plugin jobs become durable cron entries (claimed once per cluster).
+    // The braces around `state.read().await...` are LOAD-BEARING: they scope the
+    // read guard so it is dropped BEFORE the `.await` in the match arm
+    // (`host.scheduled_jobs().await`). Inlining them (per clippy) would hold the
+    // lock across that await — a real lock-across-await bug — so suppress the lint.
+    #[allow(clippy::blocks_in_conditions)]
     let plugin_crons: Vec<(String, u32)> = match { state.read().await.plugins.clone() } {
         Some(host) => host.scheduled_jobs().await,
         None => vec![],

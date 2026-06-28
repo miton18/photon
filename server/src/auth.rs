@@ -22,7 +22,7 @@ use axum::{
 };
 
 use crate::handlers::Shared;
-use crate::state::AppState;
+use crate::state::{AppState, StorageCtx};
 
 /// The authenticated caller, injected into request extensions by
 /// [`auth_middleware`]. Handlers that must scope by the caller (list endpoints,
@@ -233,7 +233,7 @@ fn guarded_resource(path: &str) -> Option<(&'static str, String)> {
 /// photo LIVE-only rule and the fail-open import-batch arm are preserved.
 pub async fn authorize(
     pool: &crate::db::Persistence,
-    config: &AppState,
+    config: &StorageCtx,
     actor: &str,
     is_admin: bool,
     method: &Method,
@@ -256,7 +256,6 @@ pub async fn authorize(
     let mut min = AppState::default();
     min.data_dir = config.data_dir.clone();
     min.storage = config.storage.clone();
-    min.password_secret = config.password_secret.clone();
 
     match kind {
         "photo" => {
@@ -332,8 +331,37 @@ fn load_map<T, F: Fn(&T) -> String>(items: Vec<T>, key: F) -> std::collections::
 
 /// Map a Postgres error during authorization to a 500 (fail CLOSED: an authz
 /// query that errors must never silently allow the request).
-fn db_err(_e: sqlx::Error) -> StatusCode {
+pub(crate) fn db_err(_e: sqlx::Error) -> StatusCode {
     StatusCode::INTERNAL_SERVER_ERROR
+}
+
+/// Ergonomic ladder collapse for the ubiquitous `Result<T, sqlx::Error>` →
+/// `Result<T, StatusCode>` mapping: `expr.or_500()?` instead of
+/// `expr.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?`.
+pub(crate) trait DbResultExt<T> {
+    fn or_500(self) -> Result<T, StatusCode>;
+}
+
+impl<T> DbResultExt<T> for Result<T, sqlx::Error> {
+    fn or_500(self) -> Result<T, StatusCode> {
+        self.map_err(db_err)
+    }
+}
+
+/// Ergonomic `Option<T>` → `Result<T, StatusCode>` for the common "row absent ⇒
+/// 404" ladder: `expr.or_404()?` instead of `expr.ok_or(StatusCode::NOT_FOUND)?`.
+pub(crate) trait DbOptionExt<T> {
+    fn or_404(self) -> Result<T, StatusCode>;
+    fn or_500(self) -> Result<T, StatusCode>;
+}
+
+impl<T> DbOptionExt<T> for Option<T> {
+    fn or_404(self) -> Result<T, StatusCode> {
+        self.ok_or(StatusCode::NOT_FOUND)
+    }
+    fn or_500(self) -> Result<T, StatusCode> {
+        self.ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+    }
 }
 
 /// Axum middleware: authenticate the caller and apply [`path_authz`] +
@@ -358,11 +386,7 @@ pub async fn auth_middleware(
     let (pool, config) = {
         let guard = st.read().await;
         let pool = guard.persistence.clone().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-        let mut config = AppState::default();
-        config.data_dir = guard.data_dir.clone();
-        config.storage = guard.storage.clone();
-        config.password_secret = guard.password_secret.clone();
-        (pool, config)
+        (pool, guard.storage_ctx())
     };
 
     // Actor: targeted `sessions` lookup, then targeted `users` lookup.

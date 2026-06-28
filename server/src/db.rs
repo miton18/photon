@@ -908,11 +908,9 @@ impl Persistence {
     }
 
     pub async fn load_photos(&self) -> Result<Vec<Photo>, sqlx::Error> {
-        let rows = sqlx::query(
-            "SELECT id, owner_id, filename, seed, kind, exif, overrides, companions, archived, deleted_at, backed_up, thumb_url, size_mb, ocr_text, ai_tags, ai_people, analyzed, clip_embedding FROM photos",
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = sqlx::query(&format!("SELECT {PHOTO_COLUMNS} FROM photos"))
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows.iter().map(row_to_photo).collect())
     }
 
@@ -1055,12 +1053,10 @@ impl Persistence {
 
     /// Single photo by id — Postgres-first read (one statement = one transaction).
     pub async fn get_photo(&self, id: &str) -> Result<Option<Photo>, sqlx::Error> {
-        let row = sqlx::query(
-            "SELECT id, owner_id, filename, seed, kind, exif, overrides, companions, archived, deleted_at, backed_up, thumb_url, size_mb, ocr_text, ai_tags, ai_people, analyzed, clip_embedding FROM photos WHERE id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let row = sqlx::query(&format!("SELECT {PHOTO_COLUMNS} FROM photos WHERE id = $1"))
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?;
         Ok(row.as_ref().map(row_to_photo))
     }
 
@@ -1231,6 +1227,14 @@ fn from_json<T: serde::de::DeserializeOwned + Default>(v: serde_json::Value) -> 
 }
 
 /// Map a `photos` row to a `Photo` (shared by `load_photos` + `get_photo`).
+/// The full stored-column list for the `photos` table, in one place so the
+/// SELECTs in [`Persistence::load_photos`] / [`Persistence::get_photo`] can't
+/// drift apart. `row_to_photo` reads by NAME (not position), so column order is
+/// irrelevant — but the SET of columns must stay in sync with the `r.get(...)`
+/// reads below. A `&'static str` interpolated into a query string (no user
+/// input) carries no injection risk.
+const PHOTO_COLUMNS: &str = "id, owner_id, filename, seed, kind, exif, overrides, companions, archived, deleted_at, backed_up, thumb_url, size_mb, ocr_text, ai_tags, ai_people, analyzed, clip_embedding";
+
 fn row_to_photo(r: &sqlx::postgres::PgRow) -> Photo {
     let seed: i64 = r.get("seed");
     let embedding: Option<Vec<f64>> = r.get("clip_embedding");

@@ -365,6 +365,18 @@ pub struct AppState {
     counter: AtomicU64,
 }
 
+/// The minimal storage configuration a blob operation needs: where blobs live
+/// (`data_dir` for the local FS backend) and the active [`StorageSettings`]
+/// (which selects FS vs S3). Cloned cheaply out of [`AppState`] via
+/// [`AppState::storage_ctx`] so the blob-serving handlers don't have to build a
+/// throwaway config-only `AppState` under the global lock just to read a single
+/// photo's bytes.
+#[derive(Clone, Default)]
+pub struct StorageCtx {
+    pub data_dir: String,
+    pub storage: StorageSettings,
+}
+
 /// Documented dev-default for the argon2id server secret, used ONLY when the
 /// `PHOTON_PASSWORD_SALT` env var is unset (a warning is logged at startup).
 /// Production deployments MUST set `PHOTON_PASSWORD_SALT`.
@@ -475,6 +487,142 @@ pub fn random_hex(n_bytes: usize) -> String {
 pub(crate) fn oidc_env_guard() -> &'static tokio::sync::Mutex<()> {
     static GUARD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     &GUARD
+}
+
+impl StorageCtx {
+    /// The configured object-storage backend: S3 when in replacement mode with a
+    /// valid `primary_s3` config, else the local filesystem. All blob reads/writes
+    /// go through this so the configured storage mode is honored consistently
+    /// (previously the store helpers hard-coded the filesystem even in S3 mode).
+    pub fn active_backend(&self) -> Box<dyn StorageBackend> {
+        if matches!(self.storage.mode, crate::models::StorageMode::S3Replacement) {
+            if let Some(cfg) = &self.storage.primary_s3 {
+                match S3Backend::from_config(cfg) {
+                    Ok(b) => return Box::new(b),
+                    Err(e) => tracing::warn!("S3 backend unavailable ({e}); using filesystem"),
+                }
+            }
+        }
+        Box::new(LocalFsBackend::new(self.data_dir.clone()))
+    }
+
+    /// Load a photo's ORIGINAL bytes from the backend, deriving the key from the
+    /// passed `&Photo` directly (filename → ext/mime). Used by the blob endpoints
+    /// so they can serve a single photo WITHOUT loading the whole DB into a
+    /// snapshot.
+    pub async fn load_original_blob(&self, photo: &crate::models::Photo) -> Option<(Vec<u8>, String)> {
+        let raw = photo.filename.rsplit('.').next()?.to_lowercase();
+        let fmt = MediaFormat::from_ext(&raw);
+        let ext = fmt.map(|f| f.ext()).unwrap_or("bin").to_string();
+        let mime = fmt
+            .map(|f| f.mime().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let key = format!("originals/{}.{ext}", photo.id);
+        self.active_backend()
+            .get_object(&key)
+            .await
+            .ok()
+            .flatten()
+            .map(|b| (b, mime))
+    }
+
+    /// Load a companion file's bytes from the backend, deriving the filename/mime
+    /// from the passed `&Photo`'s companion list. Targeted to a single photo so the
+    /// blob endpoint avoids a full snapshot. Returns `(bytes, filename, mime)`.
+    pub async fn load_companion_blob(
+        &self,
+        photo: &crate::models::Photo,
+        ext: &str,
+    ) -> Option<(Vec<u8>, String, String)> {
+        let ext = ext.to_lowercase();
+        let filename = photo
+            .companions
+            .iter()
+            .find(|c| c.ext.to_lowercase() == ext)
+            .map(|c| c.filename.clone())?;
+        // The reserved `edited` companion (a plugin-edited version) is always PNG;
+        // other companions derive their mime from the real ext.
+        let mime = if ext == EDITED_EXT {
+            "image/png".to_string()
+        } else {
+            MediaFormat::from_ext(&ext)
+                .map(|f| f.mime().to_string())
+                .unwrap_or_else(|| "application/octet-stream".to_string())
+        };
+        let key = format!("companions/{}.{ext}", photo.id);
+        self.active_backend()
+            .get_object(&key)
+            .await
+            .ok()
+            .flatten()
+            .map(|b| (b, filename, mime))
+    }
+
+    /// Load the bytes to DISPLAY for a photo: the edited version if one exists
+    /// (preferred everywhere — render, timeline), else the untouched original. The
+    /// original always remains available via [`Self::load_original_blob`].
+    pub async fn load_display_blob(&self, photo: &crate::models::Photo) -> Option<(Vec<u8>, String)> {
+        if AppState::has_edited_version(photo) {
+            let key = format!("companions/{}.{EDITED_EXT}", photo.id);
+            if let Ok(Some(b)) = self.active_backend().get_object(&key).await {
+                return Some((b, "image/png".to_string()));
+            }
+        }
+        self.load_original_blob(photo).await
+    }
+
+    /// Persist a plugin-EDITED version of `photo` (PNG bytes): write the edited
+    /// blob as the reserved `edited` companion, regenerate the thumbnail from it
+    /// (so the timeline shows the edit), and update the photo's companion list
+    /// (overwriting any prior edit). The ORIGINAL blob is left untouched. Returns
+    /// the mutated `Photo` for the caller to persist to Postgres; `None` if the
+    /// backend write fails.
+    pub async fn store_edited_version(
+        &self,
+        mut photo: crate::models::Photo,
+        png: &[u8],
+    ) -> Option<crate::models::Photo> {
+        let backend = self.active_backend();
+        let key = format!("companions/{}.{EDITED_EXT}", photo.id);
+        backend.put_object(&key, png).await.ok()?;
+
+        // Regenerate the thumbnail from the edited image so timeline/grid views
+        // show the edit. Best-effort: a thumbnail failure doesn't fail the edit.
+        if let Some(thumb) = AppState::render_thumbnail_bytes(png) {
+            let _ = backend.put_object(&format!("thumbs/{}.webp", photo.id), &thumb).await;
+        }
+
+        // Replace any prior edited companion with the fresh one.
+        let base = base_name(&photo.filename);
+        photo.companions.retain(|c| c.ext != EDITED_EXT);
+        photo.companions.push(crate::models::Companion {
+            filename: format!("{base}-edited.png"),
+            ext: EDITED_EXT.to_string(),
+            kind: "edited".to_string(),
+            size_mb: png.len() as f64 / 1_000_000.0,
+            downloadable: true,
+        });
+        Some(photo)
+    }
+
+    /// Revert a photo to its ORIGINAL: drop the reserved `edited` companion from the
+    /// photo (so `load_display_blob` serves the original again) and regenerate the
+    /// thumbnail from the original bytes. Returns the mutated `Photo` to persist.
+    pub async fn clear_edited_version(
+        &self,
+        mut photo: crate::models::Photo,
+    ) -> Option<crate::models::Photo> {
+        if let Some((bytes, _ct)) = self.load_original_blob(&photo).await {
+            if let Some(thumb) = AppState::render_thumbnail_bytes(&bytes) {
+                let _ = self
+                    .active_backend()
+                    .put_object(&format!("thumbs/{}.webp", photo.id), &thumb)
+                    .await;
+            }
+        }
+        photo.companions.retain(|c| c.ext != EDITED_EXT);
+        Some(photo)
+    }
 }
 
 impl AppState {
@@ -992,7 +1140,11 @@ impl AppState {
     }
 
     /// Delete a session from the shared store too (logout must invalidate it on
-    /// every instance, not just this one's cache).
+    /// every instance, not just this one's cache). The logout handler now clones
+    /// the pool handle and calls [`crate::db::Persistence::delete_session`]
+    /// directly (so it never holds the global write lock across the DB await); this
+    /// remains as the parallel of [`Self::persist_session`].
+    #[allow(dead_code)]
     pub async fn delete_session_persisted(&self, token: &str) {
         if let Some(p) = &self.persistence {
             if let Err(e) = p.delete_session(token).await {
@@ -1759,20 +1911,22 @@ impl AppState {
         }
     }
 
+    /// The minimal storage config ([`StorageCtx`]) needed to read/write blobs,
+    /// cloned out of this state. Handlers that only serve a single photo's bytes
+    /// grab this under a brief lock instead of building a throwaway `AppState`.
+    pub fn storage_ctx(&self) -> StorageCtx {
+        StorageCtx {
+            data_dir: self.data_dir.clone(),
+            storage: self.storage.clone(),
+        }
+    }
+
     /// The configured object-storage backend: S3 when in replacement mode with a
     /// valid `primary_s3` config, else the local filesystem. All blob reads/writes
     /// go through this so the configured storage mode is honored consistently
     /// (previously the store helpers hard-coded the filesystem even in S3 mode).
     pub fn active_backend(&self) -> Box<dyn StorageBackend> {
-        if matches!(self.storage.mode, crate::models::StorageMode::S3Replacement) {
-            if let Some(cfg) = &self.storage.primary_s3 {
-                match S3Backend::from_config(cfg) {
-                    Ok(b) => return Box::new(b),
-                    Err(e) => tracing::warn!("S3 backend unavailable ({e}); using filesystem"),
-                }
-            }
-        }
-        Box::new(LocalFsBackend::new(self.data_dir.clone()))
+        self.storage_ctx().active_backend()
     }
 
     /// DURABLE blob write for the upload path: push the originals + companions of
@@ -1862,130 +2016,9 @@ impl AppState {
             .map(|b| (b, MediaFormat::Webp.mime().to_string()))
     }
 
-    /// Load a photo's ORIGINAL bytes from the backend, deriving the key from the
-    /// passed `&Photo` directly (filename → ext/mime) instead of `self.photos`. Used
-    /// by the blob endpoints so they can serve a single photo WITHOUT loading the
-    /// whole DB into a snapshot. Only `self.storage`/`self.data_dir` are read (via
-    /// `active_backend`), so a config-only `AppState` is sufficient.
-    pub async fn load_original_blob(&self, photo: &crate::models::Photo) -> Option<(Vec<u8>, String)> {
-        let raw = photo.filename.rsplit('.').next()?.to_lowercase();
-        let fmt = MediaFormat::from_ext(&raw);
-        let ext = fmt.map(|f| f.ext()).unwrap_or("bin").to_string();
-        let mime = fmt
-            .map(|f| f.mime().to_string())
-            .unwrap_or_else(|| "application/octet-stream".to_string());
-        let key = format!("originals/{}.{ext}", photo.id);
-        self.active_backend()
-            .get_object(&key)
-            .await
-            .ok()
-            .flatten()
-            .map(|b| (b, mime))
-    }
-
-    /// Load a companion file's bytes from the backend, deriving the filename/mime
-    /// from the passed `&Photo`'s companion list (not `self.photos`). Targeted to a
-    /// single photo so the blob endpoint avoids a full snapshot. Returns
-    /// `(bytes, filename, mime)`.
-    pub async fn load_companion_blob(
-        &self,
-        photo: &crate::models::Photo,
-        ext: &str,
-    ) -> Option<(Vec<u8>, String, String)> {
-        let ext = ext.to_lowercase();
-        let filename = photo
-            .companions
-            .iter()
-            .find(|c| c.ext.to_lowercase() == ext)
-            .map(|c| c.filename.clone())?;
-        // The reserved `edited` companion (a plugin-edited version) is always PNG;
-        // other companions derive their mime from the real ext.
-        let mime = if ext == EDITED_EXT {
-            "image/png".to_string()
-        } else {
-            MediaFormat::from_ext(&ext)
-                .map(|f| f.mime().to_string())
-                .unwrap_or_else(|| "application/octet-stream".to_string())
-        };
-        let key = format!("companions/{}.{ext}", photo.id);
-        self.active_backend()
-            .get_object(&key)
-            .await
-            .ok()
-            .flatten()
-            .map(|b| (b, filename, mime))
-    }
-
     /// True if this photo has a plugin-EDITED version stored as a companion.
     pub fn has_edited_version(photo: &crate::models::Photo) -> bool {
         photo.companions.iter().any(|c| c.ext == EDITED_EXT)
-    }
-
-    /// Load the bytes to DISPLAY for a photo: the edited version if one exists
-    /// (preferred everywhere — render, timeline), else the untouched original. The
-    /// original always remains available via [`Self::load_original_blob`].
-    pub async fn load_display_blob(&self, photo: &crate::models::Photo) -> Option<(Vec<u8>, String)> {
-        if Self::has_edited_version(photo) {
-            let key = format!("companions/{}.{EDITED_EXT}", photo.id);
-            if let Ok(Some(b)) = self.active_backend().get_object(&key).await {
-                return Some((b, "image/png".to_string()));
-            }
-        }
-        self.load_original_blob(photo).await
-    }
-
-    /// Persist a plugin-EDITED version of `photo` (PNG bytes): write the edited
-    /// blob as the reserved `edited` companion, regenerate the thumbnail from it
-    /// (so the timeline shows the edit), and update the photo's companion list
-    /// (overwriting any prior edit). The ORIGINAL blob is left untouched. Returns
-    /// the mutated `Photo` for the caller to persist to Postgres; `None` if the
-    /// backend write fails. Config-only `AppState` is sufficient (uses
-    /// `active_backend` + the pure thumbnail renderer).
-    pub async fn store_edited_version(
-        &self,
-        mut photo: crate::models::Photo,
-        png: &[u8],
-    ) -> Option<crate::models::Photo> {
-        let backend = self.active_backend();
-        let key = format!("companions/{}.{EDITED_EXT}", photo.id);
-        backend.put_object(&key, png).await.ok()?;
-
-        // Regenerate the thumbnail from the edited image so timeline/grid views
-        // show the edit. Best-effort: a thumbnail failure doesn't fail the edit.
-        if let Some(thumb) = Self::render_thumbnail_bytes(png) {
-            let _ = backend.put_object(&format!("thumbs/{}.webp", photo.id), &thumb).await;
-        }
-
-        // Replace any prior edited companion with the fresh one.
-        let base = base_name(&photo.filename);
-        photo.companions.retain(|c| c.ext != EDITED_EXT);
-        photo.companions.push(crate::models::Companion {
-            filename: format!("{base}-edited.png"),
-            ext: EDITED_EXT.to_string(),
-            kind: "edited".to_string(),
-            size_mb: png.len() as f64 / 1_000_000.0,
-            downloadable: true,
-        });
-        Some(photo)
-    }
-
-    /// Revert a photo to its ORIGINAL: drop the reserved `edited` companion from the
-    /// photo (so `load_display_blob` serves the original again) and regenerate the
-    /// thumbnail from the original bytes. Returns the mutated `Photo` to persist.
-    pub async fn clear_edited_version(
-        &self,
-        mut photo: crate::models::Photo,
-    ) -> Option<crate::models::Photo> {
-        if let Some((bytes, _ct)) = self.load_original_blob(&photo).await {
-            if let Some(thumb) = Self::render_thumbnail_bytes(&bytes) {
-                let _ = self
-                    .active_backend()
-                    .put_object(&format!("thumbs/{}.webp", photo.id), &thumb)
-                    .await;
-            }
-        }
-        photo.companions.retain(|c| c.ext != EDITED_EXT);
-        Some(photo)
     }
 
     /// Drop the HEAVY blobs (full-res originals + RAW companions) of `ids` from the
@@ -2959,6 +2992,17 @@ impl AppState {
     /// that photo's `companions` — their items end `Done`/`Duplicate` referencing
     /// the primary's photo_id. Returns the created photo ids (in creation order).
     pub fn import_phase_create(&mut self, batch_id: &str) -> Vec<String> {
+        // One decodable upload awaiting CREATE: its import file id, original
+        // filename, lowercased extension, raw bytes, and extracted EXIF. (Named to
+        // replace the `(String, String, String, Vec<u8>, Exif)` tuple soup.)
+        struct PendingAsset {
+            fid: String,
+            filename: String,
+            ext: String,
+            bytes: Vec<u8>,
+            exif: Exif,
+        }
+
         let owner_id = match self.imports.get(batch_id) {
             Some(b) => b.owner_id.clone(),
             None => return Vec::new(),
@@ -2978,7 +3022,7 @@ impl AppState {
                 .collect(),
             None => return Vec::new(),
         };
-        let mut decodable: Vec<(String, String, String, Vec<u8>, Exif)> = Vec::new();
+        let mut decodable: Vec<PendingAsset> = Vec::new();
         for (file_id, filename) in decodable_ids {
             if let Some((_fname, ext, bytes)) =
                 self.pending_bytes.get(&(batch_id.to_string(), file_id.clone()))
@@ -2986,18 +3030,16 @@ impl AppState {
                 let ext = ext.clone();
                 let bytes = bytes.clone();
                 let exif = ExifExtractor.extract(&bytes, &filename);
-                decodable.push((file_id, filename, ext, bytes, exif));
+                decodable.push(PendingAsset { fid: file_id, filename, ext, bytes, exif });
             }
         }
 
         // ---- Companion grouping across the batch (date + base name). ----
         let mut order: Vec<(String, String)> = Vec::new();
-        let mut groups: HashMap<(String, String), Vec<(String, String, String, Vec<u8>, Exif)>> =
-            HashMap::new();
+        let mut groups: HashMap<(String, String), Vec<PendingAsset>> = HashMap::new();
         for entry in decodable {
-            let (ref _fid, ref filename, _, _, ref exif) = entry;
-            let date = exif.taken_at.get(0..10).unwrap_or("").to_string();
-            let key = (date, base_name(filename));
+            let date = entry.exif.taken_at.get(0..10).unwrap_or("").to_string();
+            let key = (date, base_name(&entry.filename));
             if !groups.contains_key(&key) {
                 order.push(key.clone());
             }
@@ -3009,20 +3051,25 @@ impl AppState {
             let mut group = groups.remove(&key).unwrap();
             // Pick primary: lowest display priority, ties broken by filename.
             group.sort_by(|a, b| {
-                display_priority(&a.2)
-                    .cmp(&display_priority(&b.2))
-                    .then_with(|| a.1.cmp(&b.1))
+                display_priority(&a.ext)
+                    .cmp(&display_priority(&b.ext))
+                    .then_with(|| a.filename.cmp(&b.filename))
             });
-            let (primary_fid, primary_name, primary_ext, primary_bytes, primary_exif) =
-                group.remove(0);
+            let PendingAsset {
+                fid: primary_fid,
+                filename: primary_name,
+                ext: primary_ext,
+                bytes: primary_bytes,
+                exif: primary_exif,
+            } = group.remove(0);
 
             let companions: Vec<Companion> = group
                 .iter()
-                .map(|(_, fname, ext, bytes, _)| Companion {
-                    filename: fname.clone(),
-                    ext: ext.clone(),
-                    kind: classify(ext).to_string(),
-                    size_mb: bytes.len() as f64 / (1024.0 * 1024.0),
+                .map(|a| Companion {
+                    filename: a.filename.clone(),
+                    ext: a.ext.clone(),
+                    kind: classify(&a.ext).to_string(),
+                    size_mb: a.bytes.len() as f64 / (1024.0 * 1024.0),
                     downloadable: true,
                 })
                 .collect();
@@ -3071,13 +3118,13 @@ impl AppState {
             // COMPANION DOWNLOAD: keep each companion's bytes so the UI can
             // download the RAW/.ARW sidecar. Keyed by (photo_id, ext); the
             // backend push happens best-effort in the finalize phase.
-            for (_cfid, cfname, cext, cbytes, _) in &group {
-                let mime = MediaFormat::from_ext(cext)
+            for a in &group {
+                let mime = MediaFormat::from_ext(&a.ext)
                     .map(|f| f.mime().to_string())
                     .unwrap_or_else(|| "application/octet-stream".to_string());
                 self.companion_bytes.insert(
-                    (id.clone(), cext.to_lowercase()),
-                    (cbytes.clone(), cfname.clone(), mime),
+                    (id.clone(), a.ext.to_lowercase()),
+                    (a.bytes.clone(), a.filename.clone(), mime),
                 );
             }
 
@@ -3090,7 +3137,8 @@ impl AppState {
             });
 
             // Companion items collapse: Done/merge referencing the primary photo.
-            for (cfid, _, _, _, _) in &group {
+            for a in &group {
+                let cfid = &a.fid;
                 let primary = primary_name.clone();
                 let pid = id.clone();
                 self.with_import_item(batch_id, cfid, |it| {
@@ -4003,19 +4051,19 @@ mod tests {
             .unwrap();
         let png = png.into_inner();
 
-        let edited = st.store_edited_version(p, &png).await.expect("store edited");
+        let edited = st.storage_ctx().store_edited_version(p, &png).await.expect("store edited");
         assert!(AppState::has_edited_version(&edited));
         assert_eq!(edited.companions.iter().filter(|c| c.ext == EDITED_EXT).count(), 1);
 
         // Display prefers the edited bytes; the original is still served untouched.
-        let (disp, ct) = st.load_display_blob(&edited).await.unwrap();
+        let (disp, ct) = st.storage_ctx().load_display_blob(&edited).await.unwrap();
         assert_eq!(disp, png);
         assert_eq!(ct, "image/png");
-        let (orig, _) = st.load_original_blob(&edited).await.unwrap();
+        let (orig, _) = st.storage_ctx().load_original_blob(&edited).await.unwrap();
         assert_eq!(orig, b"ORIGINAL");
 
         // Re-editing overwrites — still exactly one edited companion.
-        let edited2 = st.store_edited_version(edited, &png).await.unwrap();
+        let edited2 = st.storage_ctx().store_edited_version(edited, &png).await.unwrap();
         assert_eq!(edited2.companions.iter().filter(|c| c.ext == EDITED_EXT).count(), 1);
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -699,17 +699,12 @@ pub enum ShareTarget {
 /// The role does NOT affect timeline visibility — both viewer and contributor
 /// see a shared album in the timeline (subject to prefs). It only gates
 /// contribution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ShareRole {
+    #[default]
     Viewer,
     Contributor,
-}
-
-impl Default for ShareRole {
-    fn default() -> Self {
-        ShareRole::Viewer
-    }
 }
 
 /// An album share: a target (user or group) plus the role it is granted.
@@ -984,19 +979,14 @@ pub struct Timeline {
 // ---- Storage settings ----
 
 /// Where the primary object store lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StorageMode {
     /// Local filesystem is the source of truth (default).
+    #[default]
     Filesystem,
     /// S3 replaces the local filesystem as the primary object store.
     S3Replacement,
-}
-
-impl Default for StorageMode {
-    fn default() -> Self {
-        StorageMode::Filesystem
-    }
 }
 
 /// S3 connection config. The `secret_access_key` is WRITE-ONLY in the API:
