@@ -29,7 +29,7 @@ Photon is built in **France** as a sovereign, privacy-first alternative:
   **your own server** via a local ML sidecar — embeddings never leave the
   machine. Every AI feature is **off by default** and degrades gracefully when
   disabled, so nothing phones home unless you choose to turn it on.
-- **No lock-in.** Open source, open formats, a documented REST + MCP API, and a
+- **No lock-in.** Source-available, open formats, a documented REST + MCP API, and a
   subprocess plugin system so you can extend it without forking the core.
 - **European sovereignty.** Built to be hosted in Europe, on infrastructure you
   trust, under rules you understand.
@@ -199,6 +199,19 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the details.
 
 ## License
 
-To be announced. Until a `LICENSE` file is added, all rights are reserved by the
-author — you may read and self-host the code, but redistribution terms are not
-yet finalised.
+Photon is **source-available** under the **Photon Source Available License (PSAL)
+v1.0** — see [`LICENSE.md`](LICENSE.md) for the full terms. In short:
+
+- ✅ **Non-commercial use is free** — you may use, study, modify, create derivative
+  works, and redistribute Photon (with attribution) for non-commercial purposes.
+- 🚫 **Commercial use requires a separate license.** Selling it, bundling it in a
+  commercial product/service, offering it as a hosted/managed service, or using it
+  to support a commercial business activity all require prior written permission.
+- 📝 Redistributions must keep the license + copyright, identify the Original Author
+  (miton18), and credit *Derived from Photon by miton18 —
+  https://github.com/miton18/photon*.
+
+For commercial licensing, contact the author.
+
+> This is **not** an OSI-approved open-source license; it's a *source-available*
+> license that reserves commercial rights to the author.
