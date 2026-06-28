@@ -34,11 +34,35 @@ direction.
 Once a discussion lands on "yes, let's build this", *then* it becomes an issue and
 a PR is welcome.
 
+## Commit messages — Conventional Commits
+
+**All commits must follow [Conventional Commits](https://www.conventionalcommits.org).**
+The format is:
+
+```
+<type>(<optional scope>): <short summary>
+```
+
+Common types: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `chore`, `build`,
+`ci`, `style`. Optional scope is the area touched (`ui`, `server`, `db`, `ml`,
+`plugins`, `auth`, …). Examples:
+
+```
+feat(ui): add 3D constellation view to the People tab
+fix(auth): reject TOTP code replay within the drift window
+docs: warn that Photon is alpha software
+refactor(db): squash migrations into a single initial schema
+```
+
+Use `!` after the type/scope (or a `BREAKING CHANGE:` footer) for breaking changes,
+e.g. `feat(server)!: require DATABASE_URL to start`.
+
 ## Pull requests
 
 - **Small, obvious fixes** (typos, clear bugs, doc corrections) — just send the PR.
 - **Anything larger** — link to the issue/discussion it implements.
 - Keep the change focused; match the surrounding code's style and conventions.
+- Use Conventional Commit messages (above).
 - Make sure it builds and tests pass for the crate(s) you touched (see below).
 
 ## Project layout & building
