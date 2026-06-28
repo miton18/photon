@@ -211,7 +211,8 @@ v1.0** — see [`LICENSE.md`](LICENSE.md) for the full terms. In short:
   (miton18), and credit *Derived from Photon by miton18 —
   https://github.com/miton18/photon*.
 
-For commercial licensing, contact the author.
+For commercial licensing, contact the author. See [`NOTICE.md`](NOTICE.md) for the
+attribution text to include when redistributing.
 
 > This is **not** an OSI-approved open-source license; it's a *source-available*
 > license that reserves commercial rights to the author.
