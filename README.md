@@ -3,6 +3,8 @@
 **Your photos, on your server.** Photon is a self-hosted photo & video library —
 a private home for a lifetime of memories that you, and only you, control.
 
+![Photon timeline — a dense, justified photo grid with albums, people, places and search](docs/screenshot-timeline.jpg)
+
 > [!WARNING]
 > **Photon is alpha software — do not run it in production.**
 > It is under active development: APIs, the database schema, and the storage
