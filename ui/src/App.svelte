@@ -18,6 +18,7 @@
   import LoginScreen from './lib/components/LoginScreen.svelte';
   import PasskeyModal from './lib/components/PasskeyModal.svelte';
   import PeopleStudio from './lib/components/PeopleStudio.svelte';
+  import PeopleBrowse from './lib/components/PeopleBrowse.svelte';
   import { getPasskey, passkeysSupported, platformAuthenticatorAvailable } from './lib/passkey';
   import Icon from './lib/icons/Icon.svelte';
   import { api, API, type Album, type Group, type Person, type TimelinePrefs, type User } from './lib/api';
@@ -72,9 +73,6 @@
   let duplicateGroups = $state<UIPhoto[][]>([]);
   // Face recognition (People): clusters + the currently-open person's photos.
   let people = $state<Person[]>([]);
-  // The People tab shows only VALIDATED (named) people — naming/curation happens
-  // in the People Studio (Tag faces), never here.
-  const namedPeople = $derived(people.filter((p) => !!p.name?.trim()));
   let selectedPerson = $state<Person | null>(null);
   let personPhotos = $state<UIPhoto[]>([]);
   let selectedAlbum = $state<string | null>(null);
@@ -639,33 +637,6 @@
       toast({ tone: 'error', message: 'Could not load this person’s photos' });
     }
   }
-  // Relationships are displayed read-only here; the label resolves a related
-  // person's name from the loaded set (curation lives in the People Studio).
-  const personLabel = (id: string) =>
-    people.find((q) => q.person_id === id)?.name || 'Unnamed person';
-  // The avatar style for a person card: crop the cover photo's thumbnail to the
-  // face bbox via CSS background. Falls back to the placeholder seed image.
-  function personAvatar(p: Person): { url: string; pos: string; size: string } | null {
-    // Build the avatar straight from the cover (no dependency on the cover photo
-    // being in the loaded timeline): the cover photo's thumbnail, cropped to the
-    // face box. `source_width/height` come with the cover so we can position it.
-    if (!p.cover || !p.cover.source_width || !p.cover.source_height) {
-      const seed = (p.sample_photo_ids[0] && photoIndex.get(p.sample_photo_ids[0])?.seed) || 100;
-      return { url: `https://picsum.photos/seed/ph${seed}/200/200`, pos: 'center', size: 'cover' };
-    }
-    const url = authedUrl(`${API}/api/photos/${p.cover.photo_id}/thumb`)!;
-    const [x, y, w, h] = p.cover.bbox;
-    const pw = p.cover.source_width;
-    const ph = p.cover.source_height;
-    if (!w || !h) {
-      return { url, pos: 'center', size: 'cover' };
-    }
-    // Center the crop on the face box and zoom so the face roughly fills the tile.
-    const cx = ((x + w / 2) / pw) * 100;
-    const cy = ((y + h / 2) / ph) * 100;
-    const zoom = Math.min(400, Math.max(120, Math.round((pw / w) * 60)));
-    return { url, pos: `${cx.toFixed(1)}% ${cy.toFixed(1)}%`, size: `${zoom}%` };
-  }
 
   // ---- modals ----
   let modal = $state<'account' | 'sharing' | 'storage' | 'vault' | 'admin' | 'passkeys' | null>(null);
@@ -838,49 +809,7 @@
     {:else if nav === 'Tag faces'}
       <PeopleStudio userId={meId} />
     {:else if nav === 'People' && !selectedPerson}
-      <div class="pk-viewbar">
-        <span class="pk-viewbar-hint"><Icon name="users" size={14} />{namedPeople.length} {namedPeople.length === 1 ? 'person' : 'people'}</span>
-        <button class="pk-btn pk-btn-primary" style="margin-left:auto" onclick={() => onNav('Tag faces')}>
-          <Icon name="scan-face" size={15} />Open People Studio
-        </button>
-      </div>
-      {#if namedPeople.length === 0}
-        <div class="pk-view-empty">
-          <Icon name="users" size={26} />
-          <span>No named people yet — tag and name faces in the People Studio.</span>
-          <button class="pk-btn pk-btn-primary" onclick={() => onNav('Tag faces')}>
-            <Icon name="scan-face" size={15} />Open People Studio
-          </button>
-        </div>
-      {:else}
-      <div class="pk-peoplegrid">
-        {#each namedPeople as p (p.person_id)}
-          {@const av = personAvatar(p)}
-          <div class="pk-personcard">
-            <button class="pk-person-avatar" onclick={() => openPerson(p)} title="View photos">
-              {#if av}
-                <span class="pk-person-img" style={`background-image:url('${av.url}'); background-position:${av.pos}; background-size:${av.size};`}></span>
-              {:else}
-                <Icon name="user" size={28} />
-              {/if}
-            </button>
-            <button class="pk-person-name" onclick={() => openPerson(p)}>{p.name}</button>
-            <div class="pk-person-count">{p.face_count} photo{p.face_count === 1 ? '' : 's'}</div>
-
-            {#if p.relationships.length}
-              <div class="pk-person-rels">
-                {#each p.relationships as r (r.person_id)}
-                  <span class="pk-rel-chip" title={`${r.name || 'Unnamed person'} — ${r.relation}`}>
-                    <span class="pk-rel-kind">{r.relation}</span>
-                    <span class="pk-rel-who">{r.name || personLabel(r.person_id)}</span>
-                  </span>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/each}
-      </div>
-      {/if}
+      <PeopleBrowse {people} onOpenPerson={openPerson} onOpenStudio={() => onNav('Tag faces')} />
     {:else if nav === 'Places'}
       <PlacesMap photos={timelinePhotos} onOpenCity={openCity} />
     {:else if nav === 'Explore'}
