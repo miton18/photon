@@ -57,12 +57,31 @@ refactor(db): squash migrations into a single initial schema
 Use `!` after the type/scope (or a `BREAKING CHANGE:` footer) for breaking changes,
 e.g. `feat(server)!: require DATABASE_URL to start`.
 
+## Contributor License Agreement (required)
+
+Photon is **source-available under the PSAL**, and the author also offers paid
+**commercial licenses**. For that to work, the author needs the right to relicense
+every contribution as part of the whole project. So **all contributions are covered
+by the [Contributor License Agreement (`CLA.md`)](CLA.md).**
+
+In plain terms: **you keep the copyright to your work** — you just grant the author a
+broad, sublicensable license to it, including the right to include it in commercial
+editions of Photon. You accept the CLA by **signing off your commits**:
+
+```bash
+git commit -s -m "fix(server): ..."
+```
+
+This adds a `Signed-off-by: Your Name <you@example.com>` line, which certifies the
+[DCO](https://developercertificate.org) **and** your agreement to the CLA. PRs whose
+commits aren't signed off can't be merged.
+
 ## Pull requests
 
 - **Small, obvious fixes** (typos, clear bugs, doc corrections) — just send the PR.
 - **Anything larger** — link to the issue/discussion it implements.
 - Keep the change focused; match the surrounding code's style and conventions.
-- Use Conventional Commit messages (above).
+- Use Conventional Commit messages (above) and **sign off** every commit (`-s`).
 - Make sure it builds and tests pass for the crate(s) you touched (see below).
 
 ## Project layout & building
