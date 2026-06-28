@@ -54,6 +54,42 @@ fn user_token(req: &PluginHttpRequest) -> Option<String> {
     Some(raw.trim_start_matches("Bearer ").trim_start_matches("bearer ").trim().to_string())
 }
 
+/// Send `rb`, failing on a transport error or a non-2xx status (the status error
+/// is prefixed with `ctx`). Returns the successful response — the shared core of
+/// the reqwest send/error_for_status ladder repeated across both API clients.
+async fn send_checked(rb: reqwest::RequestBuilder, ctx: &str) -> Result<reqwest::Response, String> {
+    rb.send()
+        .await
+        .map_err(|e| e.to_string())?
+        .error_for_status()
+        .map_err(|e| format!("{ctx}: {e}"))
+}
+
+/// Send `rb` and deserialize the JSON body into `T`.
+async fn get_json<T: serde::de::DeserializeOwned>(
+    rb: reqwest::RequestBuilder,
+    ctx: &str,
+) -> Result<T, String> {
+    send_checked(rb, ctx).await?.json().await.map_err(|e| e.to_string())
+}
+
+/// Send `rb`, discarding the response body — for POSTs whose result we don't read.
+async fn send_ok(rb: reqwest::RequestBuilder, ctx: &str) -> Result<(), String> {
+    send_checked(rb, ctx).await.map(|_| ())
+}
+
+/// The `(immich_url, immich_token)` pair every wizard step requires, or a ready
+/// 400 response when either is missing.
+fn immich_creds(body: &serde_json::Value) -> Result<(&str, &str), PluginHttpResponse> {
+    match (
+        body.get("immich_url").and_then(|v| v.as_str()),
+        body.get("immich_token").and_then(|v| v.as_str()),
+    ) {
+        (Some(url), Some(key)) => Ok((url, key)),
+        _ => Err(err(400, "immich_url and immich_token required")),
+    }
+}
+
 // ---------- Immich API client ----------
 
 struct Immich {
@@ -106,36 +142,25 @@ impl Immich {
         format!("{}{}", self.base, p)
     }
     async fn me(&self) -> Result<serde_json::Value, String> {
-        self.http
-            .get(self.url("/api/users/me"))
-            .header("x-api-key", &self.key)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| format!("Immich auth/connection failed: {e}"))?
-            .json()
-            .await
-            .map_err(|e| e.to_string())
+        get_json(
+            self.http.get(self.url("/api/users/me")).header("x-api-key", &self.key),
+            "Immich auth/connection failed",
+        )
+        .await
     }
     /// Every asset on the server, paginated (cap to avoid runaway).
     async fn all_assets(&self) -> Result<Vec<ImAsset>, String> {
         let mut out = Vec::new();
         let mut page = 1u32;
         loop {
-            let resp: SearchResp = self
-                .http
-                .post(self.url("/api/search/metadata"))
-                .header("x-api-key", &self.key)
-                .json(&json!({ "page": page, "size": 1000 }))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .error_for_status()
-                .map_err(|e| format!("Immich search failed: {e}"))?
-                .json()
-                .await
-                .map_err(|e| e.to_string())?;
+            let resp: SearchResp = get_json(
+                self.http
+                    .post(self.url("/api/search/metadata"))
+                    .header("x-api-key", &self.key)
+                    .json(&json!({ "page": page, "size": 1000 })),
+                "Immich search failed",
+            )
+            .await?;
             let n = resp.assets.items.len();
             out.extend(resp.assets.items);
             let has_next = matches!(&resp.assets.next_page, Some(v) if !v.is_null());
@@ -147,46 +172,29 @@ impl Immich {
         Ok(out)
     }
     async fn albums(&self) -> Result<Vec<ImAlbumLite>, String> {
-        self.http
-            .get(self.url("/api/albums"))
-            .header("x-api-key", &self.key)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())
+        get_json(
+            self.http.get(self.url("/api/albums")).header("x-api-key", &self.key),
+            "Immich albums",
+        )
+        .await
     }
     async fn album_asset_ids(&self, id: &str) -> Result<Vec<String>, String> {
-        let d: ImAlbumDetail = self
-            .http
-            .get(self.url(&format!("/api/albums/{id}")))
-            .header("x-api-key", &self.key)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let d: ImAlbumDetail = get_json(
+            self.http.get(self.url(&format!("/api/albums/{id}"))).header("x-api-key", &self.key),
+            "Immich album",
+        )
+        .await?;
         Ok(d.assets.into_iter().map(|a| a.id).collect())
     }
     async fn download(&self, id: &str) -> Result<Vec<u8>, String> {
-        let b = self
-            .http
-            .get(self.url(&format!("/api/assets/{id}/original")))
-            .header("x-api-key", &self.key)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| format!("Immich download failed: {e}"))?
-            .bytes()
-            .await
-            .map_err(|e| e.to_string())?;
+        let b = send_checked(
+            self.http.get(self.url(&format!("/api/assets/{id}/original"))).header("x-api-key", &self.key),
+            "Immich download failed",
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(|e| e.to_string())?;
         Ok(b.to_vec())
     }
 }
@@ -208,34 +216,14 @@ impl Photon {
         format!("{}{}", self.base, p)
     }
     async fn my_id(&self) -> Result<String, String> {
-        let me: serde_json::Value = self
-            .http
-            .get(self.url("/api/me"))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let me: serde_json::Value =
+            get_json(self.http.get(self.url("/api/me")).bearer_auth(&self.token), "Photon me").await?;
         me.get("id").and_then(|v| v.as_str()).map(str::to_string).ok_or("no user id".into())
     }
     /// Lowercased set of filenames already in the user's Photon library.
     async fn existing_filenames(&self) -> Result<HashSet<String>, String> {
-        let photos: Vec<serde_json::Value> = self
-            .http
-            .get(self.url("/api/photos"))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let photos: Vec<serde_json::Value> =
+            get_json(self.http.get(self.url("/api/photos")).bearer_auth(&self.token), "Photon photos").await?;
         Ok(photos
             .iter()
             .filter_map(|p| p.get("filename").and_then(|v| v.as_str()))
@@ -243,32 +231,17 @@ impl Photon {
             .collect())
     }
     async fn albums(&self) -> Result<Vec<serde_json::Value>, String> {
-        self.http
-            .get(self.url("/api/albums"))
-            .bearer_auth(&self.token)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())
+        get_json(self.http.get(self.url("/api/albums")).bearer_auth(&self.token), "Photon albums").await
     }
     async fn create_album(&self, owner: &str, name: &str) -> Result<String, String> {
-        let a: serde_json::Value = self
-            .http
-            .post(self.url("/api/albums"))
-            .bearer_auth(&self.token)
-            .json(&json!({ "name": name, "owner_id": owner, "photo_ids": [] }))
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .await
-            .map_err(|e| e.to_string())?;
+        let a: serde_json::Value = get_json(
+            self.http
+                .post(self.url("/api/albums"))
+                .bearer_auth(&self.token)
+                .json(&json!({ "name": name, "owner_id": owner, "photo_ids": [] })),
+            "Photon album create",
+        )
+        .await?;
         a.get("id").and_then(|v| v.as_str()).map(str::to_string).ok_or("album create: no id".into())
     }
     async fn upload(&self, owner: &str, album: Option<&str>, filename: &str, bytes: &[u8]) -> Result<(), String> {
@@ -277,24 +250,20 @@ impl Photon {
         if let Some(al) = album {
             body["album_id"] = json!(al);
         }
-        self.http
-            .post(self.url("/api/uploads"))
-            .bearer_auth(&self.token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| e.to_string())?
-            .error_for_status()
-            .map_err(|e| format!("Photon upload failed: {e}"))?;
-        Ok(())
+        send_ok(
+            self.http.post(self.url("/api/uploads")).bearer_auth(&self.token).json(&body),
+            "Photon upload failed",
+        )
+        .await
     }
 }
 
 // ---------- request handlers ----------
 
 async fn handle_connect(body: &serde_json::Value) -> PluginHttpResponse {
-    let (Some(url), Some(key)) = (body.get("immich_url").and_then(|v| v.as_str()), body.get("immich_token").and_then(|v| v.as_str())) else {
-        return err(400, "immich_url and immich_token required");
+    let (url, key) = match immich_creds(body) {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
     match Immich::new(url, key).me().await {
         Ok(me) => json_resp(200, json!({ "ok": true, "user": me })),
@@ -303,8 +272,9 @@ async fn handle_connect(body: &serde_json::Value) -> PluginHttpResponse {
 }
 
 async fn handle_scan(req: &PluginHttpRequest, body: &serde_json::Value) -> PluginHttpResponse {
-    let (Some(url), Some(key)) = (body.get("immich_url").and_then(|v| v.as_str()), body.get("immich_token").and_then(|v| v.as_str())) else {
-        return err(400, "immich_url and immich_token required");
+    let (url, key) = match immich_creds(body) {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
     let Some(photon) = Photon::from_req(req) else {
         return err(401, "not authenticated to Photon (missing user token)");
@@ -384,8 +354,9 @@ async fn handle_scan(req: &PluginHttpRequest, body: &serde_json::Value) -> Plugi
 }
 
 async fn handle_import(req: &PluginHttpRequest, body: &serde_json::Value) -> PluginHttpResponse {
-    let (Some(url), Some(key)) = (body.get("immich_url").and_then(|v| v.as_str()), body.get("immich_token").and_then(|v| v.as_str())) else {
-        return err(400, "immich_url and immich_token required");
+    let (url, key) = match immich_creds(body) {
+        Ok(c) => c,
+        Err(resp) => return resp,
     };
     let Some(photon) = Photon::from_req(req) else {
         return err(401, "not authenticated to Photon");
