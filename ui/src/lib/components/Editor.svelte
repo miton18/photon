@@ -157,7 +157,7 @@
 
   // ---- Suggestions: detected people surfaced as one-tap "erase this person" ----
   let suggestions = $state<PhotoFace[]>([]);
-  let suggestSrc = { w: 0, h: 0 };
+  let suggestSrc = $state({ w: 0, h: 0 });
   let suggestLoaded = false;
   async function loadSuggestions() {
     if (suggestLoaded) return;
