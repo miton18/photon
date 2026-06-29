@@ -161,6 +161,43 @@ impl MlClient {
         }
     }
 
+    /// MAGIC ERASER: inpaint `image` over the white region of `mask` via the
+    /// sidecar's `POST /inpaint`. The body is length-framed (no multipart dep):
+    /// `[u32 BE mask_len][mask bytes][image bytes]`. Returns the inpainted PNG
+    /// bytes, or `None` on any failure (unset URL, model not loaded → 503,
+    /// connection error, non-200) so the caller can degrade gracefully.
+    pub async fn inpaint(&self, image: Vec<u8>, mask: Vec<u8>) -> Option<Vec<u8>> {
+        let url = format!("{}/inpaint", self.base_url);
+        let mut body = Vec::with_capacity(4 + mask.len() + image.len());
+        body.extend_from_slice(&(mask.len() as u32).to_be_bytes());
+        body.extend_from_slice(&mask);
+        body.extend_from_slice(&image);
+        let resp = self
+            .http
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(body)
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => match r.bytes().await {
+                Ok(b) => Some(b.to_vec()),
+                Err(e) => {
+                    tracing::warn!("ML sidecar /inpaint body read failed: {e}");
+                    None
+                }
+            },
+            Ok(r) => {
+                log_ml_status("/inpaint", r.status());
+                None
+            }
+            Err(e) => {
+                tracing::warn!("ML sidecar /inpaint request failed: {e}");
+                None
+            }
+        }
+    }
+
     /// FACE DETECTION + EMBEDDING: detect faces in raw image bytes via the
     /// sidecar's `POST /faces`, returning one [`DetectedFace`] per face (bbox +
     /// L2-normalized embedding + score). Returns `None` on any failure (unset

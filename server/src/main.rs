@@ -479,6 +479,8 @@ async fn main() {
         .route("/api/photos/{id}/rotate", post(handlers::rotate_photo))
         // Bake the editor's Light/Color tonal sliders into the `edited` companion.
         .route("/api/photos/{id}/adjust", post(handlers::adjust_photo))
+        // Magic eraser: inpaint over a mask (preview, or ?save=true to bake).
+        .route("/api/photos/{id}/inpaint", post(handlers::inpaint_photo))
         .route("/api/transcode/image", post(handlers::transcode_image))
         // SMTP config + invites (email notifications)
         .route(

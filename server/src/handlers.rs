@@ -3439,6 +3439,57 @@ pub async fn adjust_photo(
     Ok(Json(edited.effective()))
 }
 
+/// Query string for [`inpaint_photo`].
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct InpaintQuery {
+    /// When true, bake the result into the `edited` companion and return the
+    /// updated photo; otherwise return the inpainted PNG bytes as a live preview.
+    #[serde(default)]
+    pub save: bool,
+}
+
+/// POST /api/photos/{id}/inpaint — the "magic eraser". The request body is the
+/// MASK (a PNG; white/opaque = erase). The server loads the UNTOUCHED original,
+/// sends original+mask to the ML sidecar's `/inpaint`, and either returns the
+/// inpainted PNG as a preview (default) or bakes it into the reserved `edited`
+/// companion (`?save=true`), regenerating the thumbnail. Owner-only via the
+/// central `/api/photos/{id}/..` rule. Requires the ML sidecar: 503 when it's
+/// disabled/missing the model, 502 if it errors — the editor degrades gracefully.
+pub async fn inpaint_photo(
+    State(st): State<Shared>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<InpaintQuery>,
+    mask: Bytes,
+) -> Result<axum::response::Response, StatusCode> {
+    if mask.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let (pool, cfg, ml) = {
+        let g = st.read().await;
+        (g.persistence.clone().or_500()?, g.storage_ctx(), g.ml.clone())
+    };
+    // The magic eraser is meaningless without the inpainting model.
+    let ml = ml.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let photo = pool.get_photo(&id).await.or_500()?.or_404()?;
+    // Inpaint over the CURRENT display blob (the edited companion if one exists,
+    // else the original) so consecutive erases accumulate. The original is never
+    // touched; the result is stored as the `edited` companion.
+    let (bytes, _ct) = cfg.load_display_blob(&photo).await.or_404()?;
+
+    let out = ml
+        .inpaint(bytes, mask.to_vec())
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+
+    if q.save {
+        let edited = cfg.store_edited_version(photo, &out).await.or_500()?;
+        pool.upsert_photo(&edited).await.or_500()?;
+        Ok(Json(edited.effective()).into_response())
+    } else {
+        Ok(([(axum::http::header::CONTENT_TYPE, "image/png")], out).into_response())
+    }
+}
+
 /// GET /api/admin/stats — job run state + entity counts + storage estimates.
 pub async fn admin_stats(State(st): State<Shared>) -> Json<AdminStats> {
     // Job telemetry is per-instance runtime state (not persisted domain data), so
