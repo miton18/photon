@@ -65,5 +65,11 @@ dl "$FACE_REC_URL" "${PHOTON_FACE_RECOGNITION_MODEL:-auraface.onnx}"
 [ -n "${CLIP_IMAGE_URL:-}" ] && dl "$CLIP_IMAGE_URL" "${PHOTON_CLIP_IMAGE_MODEL:-clip_image.onnx}" || true
 [ -n "${CLIP_TEXT_URL:-}" ]  && dl "$CLIP_TEXT_URL"  "${PHOTON_CLIP_TEXT_MODEL:-clip_text.onnx}"   || true
 
+# INPAINT (magic eraser) — a LaMa-style ONNX model. Inputs (in order): image
+# [1,3,H,W] in [0,1] + mask [1,1,H,W] in {0,1}; output [1,3,H,W]; H/W multiple of 8.
+# Licensing varies (e.g. LaMa weights are Places2-trained), so NO default URL is
+# shipped — set INPAINT_MODEL_URL to a model you are licensed to use.
+[ -n "${INPAINT_MODEL_URL:-}" ] && dl "$INPAINT_MODEL_URL" "${PHOTON_INPAINT_MODEL:-inpaint.onnx}" || true
+
 echo "done. models in $DIR:"
 ls -la "$DIR"

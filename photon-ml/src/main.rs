@@ -16,6 +16,7 @@
 mod clip;
 mod config;
 mod faces;
+mod inpaint;
 mod ocr;
 mod state;
 
@@ -63,6 +64,7 @@ async fn main() {
         .route("/embed/text", post(embed_text))
         .route("/ocr", post(ocr))
         .route("/faces", post(faces))
+        .route("/inpaint", post(inpaint))
         // Two limits must agree: the tower-http layer AND axum's per-extractor
         // DefaultBodyLimit (2 MB by default) which the `Bytes` extractor enforces
         // and which would otherwise 413 large full-res photos before they're read.
@@ -118,6 +120,10 @@ async fn health(State(state): State<AppState>) -> Response {
             "loaded": inner.faces.is_some(),
         },
         "clip_loaded": inner.clip.is_some(),
+        "inpaint": {
+            "engine": "lama (onnx)",
+            "loaded": inner.inpaint.is_some(),
+        },
     }))
     .into_response()
 }
@@ -204,5 +210,33 @@ async fn faces(State(state): State<AppState>, body: Bytes) -> Response {
             Json(json!({ "faces": faces })).into_response()
         }
         Err(e) => err(StatusCode::BAD_REQUEST, format!("invalid image: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /inpaint  — magic eraser. Body is a length-framed blob (no multipart dep):
+//   [u32 BE: mask_len][mask bytes (PNG)][image bytes].
+// Returns the inpainted image as raw `image/png` bytes.
+// ---------------------------------------------------------------------------
+
+async fn inpaint(State(state): State<AppState>, body: Bytes) -> Response {
+    let Some(engine) = state.inner.inpaint.as_ref() else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "inpainting model not loaded");
+    };
+    if body.len() < 4 {
+        return err(StatusCode::BAD_REQUEST, "body too short");
+    }
+    let mask_len = u32::from_be_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    if body.len() < 4 + mask_len {
+        return err(StatusCode::BAD_REQUEST, "truncated mask frame");
+    }
+    let mask = &body[4..4 + mask_len];
+    let image = &body[4 + mask_len..];
+    if mask.is_empty() || image.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "empty mask or image");
+    }
+    match engine.inpaint(image, mask) {
+        Ok(png) => ([(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, format!("inpaint failed: {e}")),
     }
 }

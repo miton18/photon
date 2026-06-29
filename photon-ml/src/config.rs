@@ -37,6 +37,10 @@ pub struct Config {
     pub face_detection_file: String,
     /// Face-embedding ONNX file name (AuraFace/ArcFace by default).
     pub face_recognition_file: String,
+
+    /// Inpainting (magic-eraser) ONNX file name (LaMa-style). Operator-supplied;
+    /// absent by default so the capability is simply disabled.
+    pub inpaint_file: String,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -75,6 +79,10 @@ impl Config {
         let face_detection_file = env_or("PHOTON_FACE_DETECTION_MODEL", "scrfd.onnx");
         let face_recognition_file = env_or("PHOTON_FACE_RECOGNITION_MODEL", "auraface.onnx");
 
+        // Inpainting (magic eraser): LaMa-style ONNX. No public default URL ships
+        // (license diligence is the operator's), so the file is absent unless set.
+        let inpaint_file = env_or("PHOTON_INPAINT_MODEL", "inpaint.onnx");
+
         Self {
             models_dir,
             clip_model_name,
@@ -86,6 +94,7 @@ impl Config {
             face_model_name,
             face_detection_file,
             face_recognition_file,
+            inpaint_file,
         }
     }
 

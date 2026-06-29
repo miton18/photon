@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::clip::Clip;
 use crate::config::Config;
 use crate::faces::Faces;
+use crate::inpaint::Inpaint;
 use crate::ocr::Ocr;
 
 #[derive(Clone)]
@@ -21,6 +22,7 @@ pub struct Inner {
     pub clip: Option<Clip>,
     pub ocr: Option<Ocr>,
     pub faces: Option<Faces>,
+    pub inpaint: Option<Inpaint>,
 }
 
 impl AppState {
@@ -85,12 +87,28 @@ impl AppState {
             }
         };
 
+        let inpaint = match Inpaint::try_load(&config.model_path(&config.inpaint_file)) {
+            Ok(Some(i)) => {
+                tracing::info!("Inpainting (magic eraser) model loaded");
+                Some(i)
+            }
+            Ok(None) => {
+                tracing::warn!("Inpainting model file absent — /inpaint will return 503");
+                None
+            }
+            Err(e) => {
+                tracing::error!("Inpaint load failed: {e:#}");
+                None
+            }
+        };
+
         Self {
             inner: Arc::new(Inner {
                 config,
                 clip,
                 ocr,
                 faces,
+                inpaint,
             }),
         }
     }
