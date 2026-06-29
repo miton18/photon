@@ -26,17 +26,17 @@ use ort::value::Tensor;
 
 use crate::clip::first_f32_output;
 
-/// Cap on the inference region's largest side (perf + memory bound). A bigger
-/// masked region is downscaled to this for inference, then the filled pixels are
-/// upscaled back — fine because inpainted texture has no fine detail to lose.
-const MAX_TILE: u32 = 1024;
 /// Mask pixels strictly above this (0-255) are "fill me".
 const MASK_THRESH: u8 = 127;
-/// LaMa requires input dims to be multiples of this.
-const ALIGN: u32 = 8;
+/// Default model input side. Most LaMa ONNX exports (e.g. Carve/LaMa-ONNX) have a
+/// FIXED 512×512 input; the masked region is resized to this square for inference.
+/// Override with `PHOTON_INPAINT_SIZE` for a model trained at another resolution.
+const DEFAULT_SIZE: u32 = 512;
 
 pub struct Inpaint {
     session: Mutex<Session>,
+    /// The square side the model expects (the region is resized to this).
+    size: u32,
 }
 
 fn open_session(path: &Path) -> Result<Session> {
@@ -56,8 +56,14 @@ impl Inpaint {
         if !model_path.exists() {
             return Ok(None);
         }
+        let size = std::env::var("PHOTON_INPAINT_SIZE")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&n| n >= 64)
+            .unwrap_or(DEFAULT_SIZE);
         Ok(Some(Self {
             session: Mutex::new(open_session(model_path)?),
+            size,
         }))
     }
 
@@ -96,12 +102,10 @@ impl Inpaint {
         let roi_img = image::imageops::crop_imm(&img, rx0, ry0, rw, rh).to_image();
         let roi_mask = image::imageops::crop_imm(&mask, rx0, ry0, rw, rh).to_image();
 
-        // Downscale the ROI to <= MAX_TILE (keeping aspect), then align to 8.
-        let scale = (MAX_TILE as f32 / rw as f32)
-            .min(MAX_TILE as f32 / rh as f32)
-            .min(1.0);
-        let tw = align_up(((rw as f32 * scale).round() as u32).max(ALIGN), ALIGN);
-        let th = align_up(((rh as f32 * scale).round() as u32).max(ALIGN), ALIGN);
+        // The model expects a fixed square input: resize the cropped region (and its
+        // mask) to it. This is the "crop" high-res strategy — only the masked area is
+        // ever sent to the model, so cost is independent of the full image size.
+        let (tw, th) = (self.size, self.size);
         let in_img = image::imageops::resize(&roi_img, tw, th, FilterType::Triangle);
         let in_mask = image::imageops::resize(&roi_mask, tw, th, FilterType::Nearest);
 
@@ -170,10 +174,6 @@ impl Inpaint {
             out
         })
     }
-}
-
-fn align_up(v: u32, a: u32) -> u32 {
-    v.div_ceil(a) * a
 }
 
 /// Tight bounding box (x0,y0,x1,y1 inclusive) of pixels above the mask threshold.
