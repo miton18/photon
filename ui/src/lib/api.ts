@@ -544,6 +544,19 @@ export const api = {
     return normalizePhoto(await res.json(), owner);
   },
 
+  // Tap-to-select: segment the object under (x,y) in ORIGINAL-image pixels;
+  // returns the object mask as a Blob (white = object) for the eraser.
+  segmentPhoto: async (id: string, x: number, y: number): Promise<Blob> => {
+    const token = getToken();
+    const res = await fetch(`${API}/api/photos/${id}/segment?x=${Math.round(x)}&y=${Math.round(y)}`, {
+      method: 'POST',
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}) },
+    });
+    if (res.status === 401) throw new Unauthorized();
+    if (!res.ok) throw new Error(`segment failed (${res.status})`);
+    return res.blob();
+  },
+
   // Single-file upload: only filename + base64 bytes are sent — the server
   // extracts EXIF/dimensions/size, stores the original + thumbnail, and pairs a
   // RAW with its same-base-name primary as a companion (any arrival order).

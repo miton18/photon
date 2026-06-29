@@ -66,8 +66,10 @@
   let eraseImg = $state<HTMLImageElement>();      // the displayed <img>, to size the canvas
   let eraseCanvas = $state<HTMLCanvasElement>();
   let brush = $state(36);
+  let eraseMode = $state<'brush' | 'tap'>('brush');
   let maskDirty = $state(false);
   let inpainting = $state(false);
+  let segmenting = $state(false);
   let painting = false;
   let lastPt: { x: number; y: number } | null = null;
 
@@ -102,10 +104,43 @@
   }
   function eraseDown(e: PointerEvent) {
     syncEraseCanvas();
+    if (eraseMode === 'tap') {
+      tapSegment(e.offsetX, e.offsetY);
+      return;
+    }
     painting = true;
     lastPt = null;
     eraseCanvas?.setPointerCapture?.(e.pointerId);
     paintAt(e.offsetX, e.offsetY);
+  }
+  // Tap an object → ask the server to segment it → paint its mask onto the canvas.
+  async function tapSegment(cx: number, cy: number) {
+    const c = eraseCanvas;
+    if (!c || segmenting || inpainting) return;
+    // Canvas (display) coords → original-image pixels.
+    const sx = (photo.width || c.width) / c.width;
+    const sy = (photo.height || c.height) / c.height;
+    segmenting = true;
+    try {
+      const blob = await api.segmentPhoto(photo.id, cx * sx, cy * sy);
+      const url = URL.createObjectURL(blob);
+      const im = new Image();
+      await new Promise<void>((res, rej) => {
+        im.onload = () => res();
+        im.onerror = () => rej(new Error('mask load failed'));
+        im.src = url;
+      });
+      const ctx = c.getContext('2d');
+      // The mask (white object on black) IS a valid eraser mask; draw it scaled.
+      ctx?.clearRect(0, 0, c.width, c.height);
+      ctx?.drawImage(im, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      maskDirty = true;
+    } catch (e) {
+      toast({ tone: 'error', title: 'Could not select that object', message: String(e) });
+    } finally {
+      segmenting = false;
+    }
   }
   function eraseMove(e: PointerEvent) {
     if (painting) paintAt(e.offsetX, e.offsetY);
@@ -450,13 +485,25 @@
           <div class="pk-ed-group">
             <h5>Magic eraser</h5>
             <div class="pk-ed-empty" style="text-align:left;padding:0 0 6px">
-              Paint over what you want gone, then <b>Erase</b>. The object is
-              reconstructed from its surroundings — the original is never touched.
+              {eraseMode === 'tap'
+                ? 'Tap an object — it’s selected automatically — then Erase.'
+                : 'Paint over what you want gone, then Erase.'} The object is
+              reconstructed from its surroundings; the original is never touched.
             </div>
-            <div class="pk-ed-slider">
-              <div class="pk-ed-slider-head"><span>Brush size</span><span class="pk-mono pk-ed-val on">{brush}px</span></div>
-              <input type="range" min={8} max={120} bind:value={brush} style={`--pct:${pct(brush, 8, 120)}%`} />
+            <div class="pk-ed-aspects" style="margin-bottom:10px">
+              <button class={'pk-ed-aspect' + (eraseMode === 'brush' ? ' is-on' : '')} onclick={() => (eraseMode = 'brush')}>
+                <Icon name="brush" size={14} /> Brush
+              </button>
+              <button class={'pk-ed-aspect' + (eraseMode === 'tap' ? ' is-on' : '')} onclick={() => (eraseMode = 'tap')} title="Tap an object to select it (needs the segmentation model)">
+                <Icon name="mouse-pointer-click" size={14} /> {segmenting ? 'Selecting…' : 'Tap object'}
+              </button>
             </div>
+            {#if eraseMode === 'brush'}
+              <div class="pk-ed-slider">
+                <div class="pk-ed-slider-head"><span>Brush size</span><span class="pk-mono pk-ed-val on">{brush}px</span></div>
+                <input type="range" min={8} max={120} bind:value={brush} style={`--pct:${pct(brush, 8, 120)}%`} />
+              </div>
+            {/if}
             <div class="pk-ed-rotrow" style="margin-top:10px">
               <button class="pk-btn" onclick={clearMask} disabled={!maskDirty || inpainting}>
                 <Icon name="eraser" size={15} /> Clear mask
