@@ -2,7 +2,7 @@
   import { onDestroy } from 'svelte';
   import Icon from '../icons/Icon.svelte';
   import { displayFull, type UIPhoto } from '../media';
-  import { api, type PluginEditorOp } from '../api';
+  import { api, type PluginEditorOp, type PhotoFace } from '../api';
   import { toast } from '../toast.svelte';
 
   let {
@@ -154,6 +154,67 @@
     c?.getContext('2d')?.clearRect(0, 0, c.width, c.height);
     maskDirty = false;
   }
+
+  // ---- Suggestions: detected people surfaced as one-tap "erase this person" ----
+  let suggestions = $state<PhotoFace[]>([]);
+  let suggestSrc = { w: 0, h: 0 };
+  let suggestLoaded = false;
+  async function loadSuggestions() {
+    if (suggestLoaded) return;
+    suggestLoaded = true;
+    try {
+      const f = await api.photoFaces(photo.id);
+      suggestSrc = { w: f.source_width, h: f.source_height };
+      suggestions = f.faces;
+    } catch {
+      suggestions = [];
+    }
+  }
+  function fillFaceBox(face: PhotoFace) {
+    const c = eraseCanvas;
+    const ctx = c?.getContext('2d');
+    if (!c || !ctx) return;
+    const sx = c.width / (suggestSrc.w || photo.width || c.width);
+    const sy = c.height / (suggestSrc.h || photo.height || c.height);
+    const [bx, by, bw, bh] = face.bbox;
+    // Expand the face box to cover hair/neck/shoulders (a "remove person" heuristic).
+    const ex = bw * 0.35 * sx, ey = bh * 0.45 * sy;
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(bx * sx - ex, by * sy - ey, bw * sx + 2 * ex, bh * sy + ey + bh * 0.9 * sy);
+  }
+  // Select a detected person: precise SAM mask at the face centre, else its box.
+  async function selectFace(face: PhotoFace) {
+    const c = eraseCanvas;
+    if (!c || segmenting || inpainting) return;
+    syncEraseCanvas();
+    segmenting = true;
+    try {
+      let painted = false;
+      try {
+        const cx = face.bbox[0] + face.bbox[2] / 2;
+        const cy = face.bbox[1] + face.bbox[3] / 2;
+        const blob = await api.segmentPhoto(photo.id, cx, cy);
+        const url = URL.createObjectURL(blob);
+        const im = new Image();
+        await new Promise<void>((res, rej) => {
+          im.onload = () => res();
+          im.onerror = () => rej(new Error('mask load failed'));
+          im.src = url;
+        });
+        const ctx = c.getContext('2d');
+        ctx?.clearRect(0, 0, c.width, c.height);
+        ctx?.drawImage(im, 0, 0, c.width, c.height);
+        URL.revokeObjectURL(url);
+        painted = true;
+      } catch {
+        // Segmentation unavailable → fall back to the (expanded) face box.
+      }
+      if (!painted) fillFaceBox(face);
+      maskDirty = true;
+    } finally {
+      segmenting = false;
+    }
+  }
   function maskBlob(): Promise<Blob | null> {
     const c = eraseCanvas;
     return c ? new Promise((res) => c.toBlob((b) => res(b), 'image/png')) : Promise.resolve(null);
@@ -219,6 +280,7 @@
   function setMode(m: Mode) {
     mode = m;
     if (m === 'plugins') loadPlugins();
+    if (m === 'erase') loadSuggestions();
   }
 
   async function applyPlugin(op: PluginEditorOp) {
@@ -518,6 +580,21 @@
               </div>
             {/if}
           </div>
+          {#if suggestions.length}
+            <div class="pk-ed-group">
+              <h5>Suggestions — people in this photo</h5>
+              <div class="pk-ed-aspects" style="flex-wrap:wrap">
+                {#each suggestions as f (f.id)}
+                  <button class="pk-ed-aspect" onclick={() => selectFace(f)} disabled={segmenting || inpainting} title="Select this person, then Erase">
+                    <Icon name="user-x" size={14} /> {f.person_name || f.person_label || 'Person'}
+                  </button>
+                {/each}
+              </div>
+              <div class="pk-ed-empty" style="text-align:left;padding-top:6px">
+                One tap selects that person ({suggestSrc.w ? 'precise outline if segmentation is on' : 'face area'}); then <b>Erase</b>.
+              </div>
+            </div>
+          {/if}
         {:else if mode === 'plugins'}
           {#if pluginsLoading}
             <div class="pk-ed-group"><div class="pk-ed-empty">Loading plugins…</div></div>
