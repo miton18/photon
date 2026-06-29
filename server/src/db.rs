@@ -1201,6 +1201,18 @@ impl Persistence {
             .collect())
     }
 
+    /// True if `photo_id` is a member of ANY user's PIN vault. Vaulted photos are
+    /// hidden from everyone — including unauthenticated public album links.
+    pub async fn is_photo_vaulted(&self, photo_id: &str) -> Result<bool, sqlx::Error> {
+        let needle = serde_json::json!([photo_id]);
+        sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM vaults WHERE photo_ids @> $1)",
+        )
+        .bind(needle)
+        .fetch_one(&self.pool)
+        .await
+    }
+
     pub async fn load_vaults(&self) -> Result<Vec<(String, Vault)>, sqlx::Error> {
         let rows = sqlx::query("SELECT user_id, pin_hash, salt, photo_ids FROM vaults")
             .fetch_all(&self.pool)

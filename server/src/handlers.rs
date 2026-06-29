@@ -1215,9 +1215,17 @@ pub async fn add_album_photos(
     let p = st.read().await.persistence.clone().or_500()?;
     // Postgres-first, ONE transaction: validate photos, lock the album, append
     // the new (distinct) photo ids, write back.
+    //
+    // SECURITY: the album owner may only add photos THEY own. Without this, an
+    // owner could inject another user's (enumerable) photo id into their own album
+    // and thereby fabricate a grant to it — reading it via /render, /original and
+    // search. Mirrors `contribute_to_album`'s per-photo ownership check.
+    let album_owner = p.get_album(&id).await.or_500()?.or_404()?.owner_id;
     for pid in &body.photo_ids {
-        if p.get_photo(pid).await.ok().flatten().is_none() {
-            return Err(StatusCode::NOT_FOUND);
+        match p.get_photo(pid).await.or_500()? {
+            None => return Err(StatusCode::NOT_FOUND),
+            Some(ph) if ph.owner_id != album_owner => return Err(StatusCode::BAD_REQUEST),
+            Some(_) => {}
         }
     }
     let mut tx = p.begin().await.or_500()?;
@@ -1488,7 +1496,8 @@ pub async fn public_album(
     let mut photos: Vec<PhotoView> = Vec::new();
     for pid in &album.photo_ids {
         if let Some(photo) = p.get_photo(pid).await.or_500()? {
-            if photo.deleted_at.is_none() && !photo.archived {
+            // Live (not trashed/archived) AND not in anyone's vault.
+            if photo.deleted_at.is_none() && !photo.archived && !p.is_photo_vaulted(pid).await.or_500()? {
                 photos.push(photo.effective());
             }
         }
@@ -1518,7 +1527,7 @@ async fn public_album_photo(
         .await
         .or_500()?
         .or_404()?;
-    if photo.deleted_at.is_some() || photo.archived {
+    if photo.deleted_at.is_some() || photo.archived || p.is_photo_vaulted(photo_id).await.or_500()? {
         return Err(StatusCode::NOT_FOUND);
     }
     Ok(photo)

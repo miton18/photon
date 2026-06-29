@@ -275,6 +275,12 @@ pub async fn login_or_create_session(
         }
     };
 
+    // A disabled account must not receive a session, even via OIDC (password and
+    // passkey logins already refuse disabled users).
+    if st.users.get(&user_id).map(|u| u.disabled).unwrap_or(false) {
+        return Err("account is disabled".to_string());
+    }
+
     let token = st.create_session(&user_id);
     st.persist_session(&token).await;
     Ok(token)
