@@ -11,6 +11,7 @@ use crate::config::Config;
 use crate::faces::Faces;
 use crate::inpaint::Inpaint;
 use crate::ocr::Ocr;
+use crate::segment::Segment;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -23,6 +24,7 @@ pub struct Inner {
     pub ocr: Option<Ocr>,
     pub faces: Option<Faces>,
     pub inpaint: Option<Inpaint>,
+    pub segment: Option<Segment>,
 }
 
 impl AppState {
@@ -102,6 +104,24 @@ impl AppState {
             }
         };
 
+        let segment = match Segment::try_load(
+            &config.model_path(&config.segment_encoder_file),
+            &config.model_path(&config.segment_decoder_file),
+        ) {
+            Ok(Some(s)) => {
+                tracing::info!("Segmentation (tap-to-select) model loaded");
+                Some(s)
+            }
+            Ok(None) => {
+                tracing::warn!("Segmentation model files absent — /segment will return 503");
+                None
+            }
+            Err(e) => {
+                tracing::error!("Segment load failed: {e:#}");
+                None
+            }
+        };
+
         Self {
             inner: Arc::new(Inner {
                 config,
@@ -109,6 +129,7 @@ impl AppState {
                 ocr,
                 faces,
                 inpaint,
+                segment,
             }),
         }
     }

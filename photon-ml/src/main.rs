@@ -18,6 +18,7 @@ mod config;
 mod faces;
 mod inpaint;
 mod ocr;
+mod segment;
 mod state;
 
 use axum::{
@@ -65,6 +66,7 @@ async fn main() {
         .route("/ocr", post(ocr))
         .route("/faces", post(faces))
         .route("/inpaint", post(inpaint))
+        .route("/segment", post(segment))
         // Two limits must agree: the tower-http layer AND axum's per-extractor
         // DefaultBodyLimit (2 MB by default) which the `Bytes` extractor enforces
         // and which would otherwise 413 large full-res photos before they're read.
@@ -123,6 +125,10 @@ async fn health(State(state): State<AppState>) -> Response {
         "inpaint": {
             "engine": "lama (onnx)",
             "loaded": inner.inpaint.is_some(),
+        },
+        "segment": {
+            "engine": "sam (onnx)",
+            "loaded": inner.segment.is_some(),
         },
     }))
     .into_response()
@@ -238,5 +244,33 @@ async fn inpaint(State(state): State<AppState>, body: Bytes) -> Response {
     match engine.inpaint(image, mask) {
         Ok(png) => ([(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response(),
         Err(e) => err(StatusCode::BAD_REQUEST, format!("inpaint failed: {e}")),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /segment?x=&y=  (raw image bytes) -> object mask PNG (white = object).
+// Tap-to-select for the magic eraser: the point is in ORIGINAL-image pixels.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct Point {
+    x: f32,
+    y: f32,
+}
+
+async fn segment(
+    State(state): State<AppState>,
+    axum::extract::Query(pt): axum::extract::Query<Point>,
+    body: Bytes,
+) -> Response {
+    let Some(engine) = state.inner.segment.as_ref() else {
+        return err(StatusCode::SERVICE_UNAVAILABLE, "segmentation model not loaded");
+    };
+    if body.is_empty() {
+        return err(StatusCode::BAD_REQUEST, "empty image body");
+    }
+    match engine.segment(&body, pt.x, pt.y) {
+        Ok(png) => ([(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response(),
+        Err(e) => err(StatusCode::BAD_REQUEST, format!("segment failed: {e}")),
     }
 }

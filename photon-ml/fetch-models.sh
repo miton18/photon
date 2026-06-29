@@ -71,5 +71,11 @@ dl "$FACE_REC_URL" "${PHOTON_FACE_RECOGNITION_MODEL:-auraface.onnx}"
 # shipped — set INPAINT_MODEL_URL to a model you are licensed to use.
 [ -n "${INPAINT_MODEL_URL:-}" ] && dl "$INPAINT_MODEL_URL" "${PHOTON_INPAINT_MODEL:-inpaint.onnx}" || true
 
+# SEGMENT (tap-to-select) — a SAM-family two-graph ONNX export (encoder + decoder),
+# e.g. MobileSAM/EfficientSAM (Apache-2.0). No default URL is shipped; set
+# SEGMENT_ENCODER_URL / SEGMENT_DECODER_URL to enable.
+[ -n "${SEGMENT_ENCODER_URL:-}" ] && dl "$SEGMENT_ENCODER_URL" "${PHOTON_SEGMENT_ENCODER:-sam_encoder.onnx}" || true
+[ -n "${SEGMENT_DECODER_URL:-}" ] && dl "$SEGMENT_DECODER_URL" "${PHOTON_SEGMENT_DECODER:-sam_decoder.onnx}" || true
+
 echo "done. models in $DIR:"
 ls -la "$DIR"

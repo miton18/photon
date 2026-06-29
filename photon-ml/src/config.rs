@@ -41,6 +41,11 @@ pub struct Config {
     /// Inpainting (magic-eraser) ONNX file name (LaMa-style). Operator-supplied;
     /// absent by default so the capability is simply disabled.
     pub inpaint_file: String,
+
+    /// Promptable segmentation (SAM-family) ONNX files for tap-to-select.
+    /// Operator-supplied; both absent by default ⇒ capability disabled.
+    pub segment_encoder_file: String,
+    pub segment_decoder_file: String,
 }
 
 fn env_or(key: &str, default: &str) -> String {
@@ -83,6 +88,10 @@ impl Config {
         // (license diligence is the operator's), so the file is absent unless set.
         let inpaint_file = env_or("PHOTON_INPAINT_MODEL", "inpaint.onnx");
 
+        // Promptable segmentation (MobileSAM/EfficientSAM/SAM), two-graph export.
+        let segment_encoder_file = env_or("PHOTON_SEGMENT_ENCODER", "sam_encoder.onnx");
+        let segment_decoder_file = env_or("PHOTON_SEGMENT_DECODER", "sam_decoder.onnx");
+
         Self {
             models_dir,
             clip_model_name,
@@ -95,6 +104,8 @@ impl Config {
             face_detection_file,
             face_recognition_file,
             inpaint_file,
+            segment_encoder_file,
+            segment_decoder_file,
         }
     }
 
