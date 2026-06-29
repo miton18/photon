@@ -11,7 +11,7 @@
     onSaved,
   }: { photo: UIPhoto; onClose: () => void; onSaved: (p: UIPhoto) => void } = $props();
 
-  type Mode = 'crop' | 'light' | 'color' | 'meta' | 'plugins';
+  type Mode = 'crop' | 'light' | 'color' | 'meta' | 'erase' | 'plugins';
   const LIGHT: [string, string][] = [
     ['exposure', 'Exposure'],
     ['brightness', 'Brightness'],
@@ -61,6 +61,102 @@
   let savingPlugin = $state<string | null>(null);
   // object URL of the plugin preview currently shown (null = original)
   let pluginPreview = $state<string | null>(null);
+
+  // ---- Magic eraser (paint a mask → server inpaints over it) ----
+  let eraseImg = $state<HTMLImageElement>();      // the displayed <img>, to size the canvas
+  let eraseCanvas = $state<HTMLCanvasElement>();
+  let brush = $state(36);
+  let maskDirty = $state(false);
+  let inpainting = $state(false);
+  let painting = false;
+  let lastPt: { x: number; y: number } | null = null;
+
+  function syncEraseCanvas() {
+    const c = eraseCanvas, im = eraseImg;
+    if (!c || !im) return;
+    const w = im.clientWidth, h = im.clientHeight;
+    if (w > 0 && h > 0 && (c.width !== w || c.height !== h)) {
+      c.width = w;
+      c.height = h;
+    }
+  }
+  function paintAt(x: number, y: number) {
+    const c = eraseCanvas;
+    const ctx = c?.getContext('2d');
+    if (!c || !ctx) return;
+    ctx.fillStyle = '#fff';
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = brush;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.arc(x, y, brush / 2, 0, Math.PI * 2);
+    ctx.fill();
+    if (lastPt) {
+      ctx.beginPath();
+      ctx.moveTo(lastPt.x, lastPt.y);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+    lastPt = { x, y };
+    maskDirty = true;
+  }
+  function eraseDown(e: PointerEvent) {
+    syncEraseCanvas();
+    painting = true;
+    lastPt = null;
+    eraseCanvas?.setPointerCapture?.(e.pointerId);
+    paintAt(e.offsetX, e.offsetY);
+  }
+  function eraseMove(e: PointerEvent) {
+    if (painting) paintAt(e.offsetX, e.offsetY);
+  }
+  function eraseEnd() {
+    painting = false;
+    lastPt = null;
+  }
+  function clearMask() {
+    const c = eraseCanvas;
+    c?.getContext('2d')?.clearRect(0, 0, c.width, c.height);
+    maskDirty = false;
+  }
+  function maskBlob(): Promise<Blob | null> {
+    const c = eraseCanvas;
+    return c ? new Promise((res) => c.toBlob((b) => res(b), 'image/png')) : Promise.resolve(null);
+  }
+  async function erasePreview() {
+    if (!maskDirty || inpainting) return;
+    const blob = await maskBlob();
+    if (!blob) return;
+    inpainting = true;
+    try {
+      const url = await api.inpaintPreview(photo.id, blob);
+      if (pluginPreview) URL.revokeObjectURL(pluginPreview);
+      pluginPreview = url;
+      clearMask();
+      toast({ tone: 'success', message: 'Erased (preview) — Save copy to keep it', actionLabel: 'OK' });
+    } catch (e) {
+      toast({ tone: 'error', title: 'Erase failed (is the ML sidecar running?)', message: String(e) });
+    } finally {
+      inpainting = false;
+    }
+  }
+  async function eraseSave() {
+    if (inpainting) return;
+    const blob = await maskBlob();
+    // Nothing painted and nothing previewed → nothing to save.
+    if (!blob || (!maskDirty && !pluginPreview)) return;
+    inpainting = true;
+    try {
+      const updated = await api.inpaintSave(photo.id, blob, photo.owner_id);
+      onSaved(updated);
+      toast({ tone: 'success', message: 'Saved as a copy (original kept)', actionLabel: 'OK' });
+      onClose();
+    } catch (e) {
+      toast({ tone: 'error', title: 'Save failed', message: String(e) });
+    } finally {
+      inpainting = false;
+    }
+  }
 
   function opKey(op: PluginEditorOp) {
     return `${op.plugin}/${op.id}`;
@@ -241,6 +337,10 @@
         <button class="pk-btn pk-btn-primary" onclick={saveAdjust} disabled={savingAdjust || !adjDirty}>
           <Icon name="check" size={15} /> {savingAdjust ? 'Saving…' : 'Save copy'}
         </button>
+      {:else if mode === 'erase'}
+        <button class="pk-btn pk-btn-primary" onclick={eraseSave} disabled={inpainting || (!maskDirty && !pluginPreview)}>
+          <Icon name="check" size={15} /> {inpainting ? 'Working…' : 'Save copy'}
+        </button>
       {/if}
     </div>
   </div>
@@ -248,19 +348,30 @@
   <div class="pk-ed-body">
     <div class="pk-ed-stage">
       <div class="pk-ed-imgwrap">
-        <img class="pk-ed-img" src={pluginPreview ?? displayFull(photo)} alt={photo.filename} style={pluginPreview ? '' : imgStyle} />
+        <img bind:this={eraseImg} onload={syncEraseCanvas} class="pk-ed-img" src={pluginPreview ?? displayFull(photo)} alt={photo.filename} style={pluginPreview ? '' : imgStyle} />
         {#if mode === 'crop'}
           <div class={'pk-ed-crop ar-' + aspect}>
             <span></span><span></span><span></span><span></span>
             <i class="c tl"></i><i class="c tr"></i><i class="c bl"></i><i class="c br"></i>
           </div>
         {/if}
+        {#if mode === 'erase'}
+          <!-- Mask-painting overlay, sized to the rendered image. White strokes = erase. -->
+          <canvas
+            bind:this={eraseCanvas}
+            class="pk-ed-maskcanvas"
+            onpointerdown={eraseDown}
+            onpointermove={eraseMove}
+            onpointerup={eraseEnd}
+            onpointerleave={eraseEnd}
+          ></canvas>
+        {/if}
       </div>
     </div>
 
     <div class="pk-ed-panel">
       <div class="pk-ed-tabs">
-        {#each [['meta', 'info', 'Info'], ['crop', 'crop', 'Crop'], ['light', 'sun', 'Light'], ['color', 'palette', 'Color'], ['plugins', 'puzzle', 'Plugins']] as [m, ic, lbl] (m)}
+        {#each [['meta', 'info', 'Info'], ['crop', 'crop', 'Crop'], ['light', 'sun', 'Light'], ['color', 'palette', 'Color'], ['erase', 'eraser', 'Erase'], ['plugins', 'puzzle', 'Plugins']] as [m, ic, lbl] (m)}
           <button class={'pk-ed-tab' + (mode === m ? ' is-on' : '')} onclick={() => setMode(m as Mode)}>
             <Icon name={ic} size={16} /><span>{lbl}</span>
           </button>
@@ -334,6 +445,31 @@
                 <input type="range" min={-100} max={100} bind:value={adj[k]} style={`--pct:${pct(adj[k], -100, 100)}%`} ondblclick={() => (adj[k] = 0)} />
               </div>
             {/each}
+          </div>
+        {:else if mode === 'erase'}
+          <div class="pk-ed-group">
+            <h5>Magic eraser</h5>
+            <div class="pk-ed-empty" style="text-align:left;padding:0 0 6px">
+              Paint over what you want gone, then <b>Erase</b>. The object is
+              reconstructed from its surroundings — the original is never touched.
+            </div>
+            <div class="pk-ed-slider">
+              <div class="pk-ed-slider-head"><span>Brush size</span><span class="pk-mono pk-ed-val on">{brush}px</span></div>
+              <input type="range" min={8} max={120} bind:value={brush} style={`--pct:${pct(brush, 8, 120)}%`} />
+            </div>
+            <div class="pk-ed-rotrow" style="margin-top:10px">
+              <button class="pk-btn" onclick={clearMask} disabled={!maskDirty || inpainting}>
+                <Icon name="eraser" size={15} /> Clear mask
+              </button>
+              <button class="pk-btn pk-btn-primary" onclick={erasePreview} disabled={!maskDirty || inpainting}>
+                <Icon name="sparkles" size={15} /> {inpainting ? 'Erasing…' : 'Erase'}
+              </button>
+            </div>
+            {#if pluginPreview}
+              <div class="pk-ed-empty" style="text-align:left;padding-top:8px">
+                Preview shown. Paint again to remove more, or <b>Save copy</b> to keep it.
+              </div>
+            {/if}
           </div>
         {:else if mode === 'plugins'}
           {#if pluginsLoading}

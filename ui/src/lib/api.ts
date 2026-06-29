@@ -511,6 +511,39 @@ export const api = {
       body: JSON.stringify(adj),
     }).then((p) => normalizePhoto(p, owner)),
 
+  // Magic eraser: send the MASK (a PNG Blob; white = erase) for photo {id}. The
+  // server inpaints over it on the untouched original via the ML sidecar.
+  // Preview returns an object-URL to the inpainted image (revoke it when done).
+  inpaintPreview: async (id: string, maskPng: Blob): Promise<string> => {
+    const token = getToken();
+    const res = await fetch(`${API}/api/photos/${id}/inpaint`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: maskPng,
+    });
+    if (res.status === 401) throw new Unauthorized();
+    if (!res.ok) throw new Error(`inpaint failed (${res.status})`);
+    return URL.createObjectURL(await res.blob());
+  },
+  // Bake the inpaint into the edited companion (original kept); returns the photo.
+  inpaintSave: async (id: string, maskPng: Blob, owner: string | undefined = undefined): Promise<UIPhoto> => {
+    const token = getToken();
+    const res = await fetch(`${API}/api/photos/${id}/inpaint?save=true`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/octet-stream',
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: maskPng,
+    });
+    if (res.status === 401) throw new Unauthorized();
+    if (!res.ok) throw new Error(`inpaint failed (${res.status})`);
+    return normalizePhoto(await res.json(), owner);
+  },
+
   // Single-file upload: only filename + base64 bytes are sent — the server
   // extracts EXIF/dimensions/size, stores the original + thumbnail, and pairs a
   // RAW with its same-base-name primary as a companion (any arrival order).
