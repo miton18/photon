@@ -3490,6 +3490,37 @@ pub async fn inpaint_photo(
     }
 }
 
+/// Query string for [`segment_photo`]: the tap point in original-image pixels.
+#[derive(Debug, serde::Deserialize)]
+pub struct SegmentQuery {
+    pub x: f32,
+    pub y: f32,
+}
+
+/// POST /api/photos/{id}/segment?x=&y= — tap-to-select for the magic eraser. The
+/// server segments the object under the point (original-image pixels) via the ML
+/// sidecar and returns the object MASK as `image/png` (white = object). The editor
+/// drops it into its erase mask. Owner-only via the central `/api/photos/{id}/..`
+/// rule; 503 when segmentation is disabled, 502 on a sidecar error.
+pub async fn segment_photo(
+    State(st): State<Shared>,
+    Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SegmentQuery>,
+) -> Result<axum::response::Response, StatusCode> {
+    let (pool, cfg, ml) = {
+        let g = st.read().await;
+        (g.persistence.clone().or_500()?, g.storage_ctx(), g.ml.clone())
+    };
+    let ml = ml.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let photo = pool.get_photo(&id).await.or_500()?.or_404()?;
+    let (bytes, _ct) = cfg.load_display_blob(&photo).await.or_404()?;
+    let mask = ml
+        .segment(bytes, q.x, q.y)
+        .await
+        .ok_or(StatusCode::BAD_GATEWAY)?;
+    Ok(([(axum::http::header::CONTENT_TYPE, "image/png")], mask).into_response())
+}
+
 /// GET /api/admin/stats — job run state + entity counts + storage estimates.
 pub async fn admin_stats(State(st): State<Shared>) -> Json<AdminStats> {
     // Job telemetry is per-instance runtime state (not persisted domain data), so

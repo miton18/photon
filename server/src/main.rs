@@ -481,6 +481,8 @@ async fn main() {
         .route("/api/photos/{id}/adjust", post(handlers::adjust_photo))
         // Magic eraser: inpaint over a mask (preview, or ?save=true to bake).
         .route("/api/photos/{id}/inpaint", post(handlers::inpaint_photo))
+        // Magic eraser tap-to-select: object mask under a point.
+        .route("/api/photos/{id}/segment", post(handlers::segment_photo))
         .route("/api/transcode/image", post(handlers::transcode_image))
         // SMTP config + invites (email notifications)
         .route(

@@ -198,6 +198,32 @@ impl MlClient {
         }
     }
 
+    /// TAP-TO-SELECT: segment the object under `(x, y)` (ORIGINAL-image pixels)
+    /// via the sidecar's `POST /segment?x=&y=`, returning a binary mask PNG (white
+    /// = object). `None` on any failure (unset URL, model not loaded → 503,
+    /// connection error, non-200) so the caller degrades gracefully.
+    pub async fn segment(&self, image: Vec<u8>, x: f32, y: f32) -> Option<Vec<u8>> {
+        let url = format!("{}/segment?x={x}&y={y}", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(image)
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => r.bytes().await.ok().map(|b| b.to_vec()),
+            Ok(r) => {
+                log_ml_status("/segment", r.status());
+                None
+            }
+            Err(e) => {
+                tracing::warn!("ML sidecar /segment request failed: {e}");
+                None
+            }
+        }
+    }
+
     /// FACE DETECTION + EMBEDDING: detect faces in raw image bytes via the
     /// sidecar's `POST /faces`, returning one [`DetectedFace`] per face (bbox +
     /// L2-normalized embedding + score). Returns `None` on any failure (unset
