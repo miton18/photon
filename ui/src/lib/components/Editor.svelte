@@ -130,10 +130,8 @@
         im.onerror = () => rej(new Error('mask load failed'));
         im.src = url;
       });
-      const ctx = c.getContext('2d');
-      // The mask (white object on black) IS a valid eraser mask; draw it scaled.
-      ctx?.clearRect(0, 0, c.width, c.height);
-      ctx?.drawImage(im, 0, 0, c.width, c.height);
+      // Union the object mask into the existing mask (white wins) so taps add up.
+      drawMaskUnion(im);
       URL.revokeObjectURL(url);
       maskDirty = true;
     } catch (e) {
@@ -153,6 +151,17 @@
     const c = eraseCanvas;
     c?.getContext('2d')?.clearRect(0, 0, c.width, c.height);
     maskDirty = false;
+  }
+  // Composite a (white-object-on-black) mask image into the canvas, keeping any
+  // existing white. `lighten` = max per channel, so previously-masked pixels stay
+  // masked — taps/segments accumulate instead of replacing the mask.
+  function drawMaskUnion(im: HTMLImageElement) {
+    const c = eraseCanvas;
+    const ctx = c?.getContext('2d');
+    if (!c || !ctx) return;
+    ctx.globalCompositeOperation = 'lighten';
+    ctx.drawImage(im, 0, 0, c.width, c.height);
+    ctx.globalCompositeOperation = 'source-over';
   }
 
   // ---- Suggestions: detected people surfaced as one-tap "erase this person" ----
@@ -201,9 +210,7 @@
           im.onerror = () => rej(new Error('mask load failed'));
           im.src = url;
         });
-        const ctx = c.getContext('2d');
-        ctx?.clearRect(0, 0, c.width, c.height);
-        ctx?.drawImage(im, 0, 0, c.width, c.height);
+        drawMaskUnion(im);
         URL.revokeObjectURL(url);
         painted = true;
       } catch {
@@ -228,8 +235,9 @@
       const url = await api.inpaintPreview(photo.id, blob);
       if (pluginPreview) URL.revokeObjectURL(pluginPreview);
       pluginPreview = url;
-      clearMask();
-      toast({ tone: 'success', message: 'Erased (preview) — Save copy to keep it', actionLabel: 'OK' });
+      // Keep the mask: each preview re-inpaints the ORIGINAL with the FULL
+      // accumulated mask, so erasing B doesn't bring A back. "Clear mask" resets.
+      toast({ tone: 'success', message: 'Erased (preview) — paint more or Save copy', actionLabel: 'OK' });
     } catch (e) {
       toast({ tone: 'error', title: 'Erase failed (is the ML sidecar running?)', message: String(e) });
     } finally {
